@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+
+.venv/
+venv/
+env/
+
+build/
+dist/
+*.spec
+
+models/
+output/
+screen/
+
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.log
+
+main - Copy.py
