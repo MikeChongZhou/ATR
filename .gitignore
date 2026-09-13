@@ -12,6 +12,7 @@ dist/
 models/
 output/
 screen/
+tools/
 
 *.mp3
 *.wav

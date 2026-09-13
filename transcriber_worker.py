@@ -1,56 +1,56 @@
 from __future__ import annotations
 
+import contextlib
 import gc
-from pathlib import Path
+import os
+import sys
 from typing import Any
 
 
-def usable_model_dir(path: Path) -> bool:
-    return path.exists() and (path / "config.json").exists() and (path / "model.bin").exists()
+def lower_current_process_priority() -> None:
+    if sys.platform != "win32":
+        return
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        idle_priority_class = 0x00000040
+        kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), idle_priority_class)
 
 
-def resolve_model_path(config: dict[str, Any]) -> str:
-    local_model_dir = Path(str(config["local_model_dir"]))
-    fallback_model_dir = Path(str(config["fallback_model_dir"]))
-    if usable_model_dir(local_model_dir):
-        return str(local_model_dir)
-    if usable_model_dir(fallback_model_dir):
-        return str(fallback_model_dir)
-    return str(config["model"])
+def limit_native_threads() -> None:
+    for name in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
+        os.environ.setdefault(name, "1")
 
 
-def drain_until_done(input_queue: Any) -> None:
-    while True:
-        item = input_queue.get()
-        if item is None:
-            return
+def run_transcriber_process(input_queue: Any, output_queue: Any, config: dict[str, Any]) -> None:
+    lower_current_process_priority()
+    limit_native_threads()
 
-
-def run_transcriber_process(
-    input_queue: Any,
-    output_queue: Any,
-    config: dict[str, Any],
-    cancel_realtime_event: Any = None,
-) -> None:
     model = None
     try:
         from faster_whisper import WhisperModel
-
-        model = WhisperModel(
-            resolve_model_path(config),
-            device=config["device"],
-            compute_type=config["compute_type"],
-            cpu_threads=int(config["cpu_threads"]),
-            num_workers=int(config["num_workers"]),
-        )
-    except ImportError as exc:
-        output_queue.put({"kind": "missing", "message": str(exc)})
-        drain_until_done(input_queue)
+    except ImportError:
+        output_queue.put({"kind": "missing"})
         output_queue.put({"kind": "done"})
         return
+
+    try:
+        model = WhisperModel(
+            config["model_path"],
+            device=config["device"],
+            compute_type=config["compute_type"],
+            cpu_threads=config["cpu_threads"],
+            num_workers=config["num_workers"],
+        )
     except Exception as exc:
         output_queue.put({"kind": "error", "message": str(exc)})
-        drain_until_done(input_queue)
         output_queue.put({"kind": "done"})
         return
 
@@ -60,9 +60,6 @@ def run_transcriber_process(
             if job is None:
                 break
 
-            kind = job.get("kind")
-            if kind == "realtime" and cancel_realtime_event is not None and cancel_realtime_event.is_set():
-                continue
             audio = job.get("audio")
             if audio is None or getattr(audio, "size", 0) == 0:
                 continue
@@ -70,43 +67,27 @@ def run_transcriber_process(
             try:
                 segments, _info = model.transcribe(
                     audio,
-                    beam_size=int(job["beam_size"]),
+                    beam_size=int(job.get("beam_size", 1)),
                     language=config["language"],
                     vad_filter=True,
                     vad_parameters=config["vad_parameters"],
-                    condition_on_previous_text=bool(job["condition_on_previous_text"]),
+                    condition_on_previous_text=False,
                 )
-                if kind == "realtime":
-                    text = "".join(segment.text for segment in segments).strip()
-                    output_queue.put(
-                        {
-                            "kind": "realtime",
-                            "source_name": job["source_name"],
-                            "start": float(job.get("start", 0.0)),
-                            "end": float(job.get("end", job.get("start", 0.0))),
-                            "text": text,
-                        }
-                    )
-                elif kind == "review":
-                    start = float(job["start"])
-                    end = float(job.get("end", start))
-                    entries = [
-                        (start + float(segment.start), start + float(segment.end), segment.text.strip())
-                        for segment in segments
-                        if segment.text.strip()
-                    ]
-                    output_queue.put(
-                        {
-                            "kind": "review",
-                            "source_name": job["source_name"],
-                            "start": start,
-                            "end": end,
-                            "entries": entries,
-                        }
-                    )
+                text = "".join(segment.text for segment in segments).strip()
             except Exception as exc:
                 output_queue.put({"kind": "error", "message": str(exc)})
+                continue
+
+            if text:
+                output_queue.put(
+                    {
+                        "kind": "realtime",
+                        "source_name": job.get("source_name", "source_speaker"),
+                        "text": text,
+                    }
+                )
     finally:
-        model = None
+        with contextlib.suppress(Exception):
+            del model
         gc.collect()
         output_queue.put({"kind": "done"})

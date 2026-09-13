@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import io
 import logging
 import multiprocessing as mp
 import os
 import queue
 import re
-import shutil
 import sys
-import tempfile
 import threading
 import time
 import warnings
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -33,12 +31,12 @@ RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
 CHUNK_SECONDS = 0.5
+CAPTURE_READ_SECONDS = 0.05
+CAPTURE_BLOCK_SECONDS = 0.2
 TRANSCRIBE_SECONDS = 2
 REALTIME_MIN_AUDIO_SECONDS = 1.5
 REVIEW_SECONDS = 15
-REVIEW_OVERLAP_SECONDS = 2
 REVIEW_MIN_AUDIO_SECONDS = 3
-STOP_FINAL_WAIT_SECONDS = 15
 MINUTES_UPDATE_SECONDS = 5
 AUTO_SCREENSHOT_SCAN_SECONDS = 0.5
 AUTO_SCREENSHOT_STABLE_SECONDS = 0.6
@@ -48,20 +46,26 @@ AUTO_SCREENSHOT_STABLE_THRESHOLD = 0.02
 SCREENSHOT_PREVIEW_SIZE = (180, 100)
 WHISPER_MODEL = "distil-small.en"
 LOCAL_MODEL_DIR = Path(__file__).with_name("models") / "faster-distil-whisper-small.en"
+FALLBACK_WHISPER_MODEL = "small"
 FALLBACK_MODEL_DIR = Path(__file__).with_name("models") / "faster-whisper-small"
 WHISPER_LANGUAGE: Optional[str] = "en"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
-WHISPER_CPU_THREADS = max(1, min(4, (os.cpu_count() or 4) - 1))
-WHISPER_NUM_WORKERS = 2
+WHISPER_CPU_THREADS = 1
+WHISPER_NUM_WORKERS = 1
 REALTIME_BEAM_SIZE = 1
 FINAL_BEAM_SIZE = 5
 VAD_PARAMETERS = {"min_silence_duration_ms": 500}
 MIN_TRANSCRIBE_RMS = 0.0015
 DEFAULT_LANGUAGE = "en"
-AUDIO_SOURCES = ("source_speaker", "source_microphone")
+AUDIO_ONLY_DIAGNOSTIC = False
+TRANSCRIPTION_SOURCE_QUEUE_SECONDS = 120
+TRANSCRIPTION_SOURCE_QUEUE_MAXSIZE = max(1, int(TRANSCRIPTION_SOURCE_QUEUE_SECONDS / CHUNK_SECONDS))
+TRANSCRIBER_INPUT_QUEUE_MAXSIZE = 2
+TRANSCRIBER_OUTPUT_QUEUE_MAXSIZE = 20
+ENABLE_BACKGROUND_REVIEW = False
+AUDIO_SOURCES = ("source_speaker",)
 SPEAKER_LABEL_KEYS = {
-    "source_microphone": "speaker_me",
     "source_speaker": "speaker_others",
 }
 
@@ -89,11 +93,10 @@ TRANSLATIONS = {
         "details": "Details",
         "not_recording": "No recording is currently in progress.",
         "source_speaker": "speaker",
-        "source_microphone": "microphone",
         "speaker_me": "Me",
         "speaker_others": "Others",
         "source_unavailable": "{source} recording is unavailable. Other available audio sources will continue to be saved.",
-        "all_sources_unavailable": "Speaker and microphone recording are both unavailable.",
+        "all_sources_unavailable": "Speaker recording is unavailable.",
         "save_question": "Do you want to save the MP3 file and text file?",
         "save_dialog_title": "Save recording and transcript",
         "mp3_files": "MP3 files",
@@ -140,11 +143,10 @@ TRANSLATIONS = {
         "details": "详细信息",
         "not_recording": "当前并未录音。",
         "source_speaker": "扬声器",
-        "source_microphone": "麦克风",
         "speaker_me": "本人",
         "speaker_others": "其他人",
         "source_unavailable": "{source}录音不可用，将继续保存其他可用声音。",
-        "all_sources_unavailable": "扬声器和麦克风录音都不可用。",
+        "all_sources_unavailable": "扬声器录音不可用。",
         "save_question": "是否保存 MP3 文件和文本文件？",
         "save_dialog_title": "保存录音和转录文本",
         "mp3_files": "MP3 文件",
@@ -180,6 +182,38 @@ def quiet_library_noise() -> None:
         message=".*data discontinuity in recording.*",
         module=r"soundcard\.mediafoundation",
     )
+
+
+def lower_current_thread_priority() -> None:
+    if sys.platform != "win32":
+        return
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_current_thread = kernel32.GetCurrentThread
+        set_thread_priority = kernel32.SetThreadPriority
+        thread = get_current_thread()
+        thread_mode_background_begin = 0x00010000
+        thread_priority_below_normal = -1
+        if not set_thread_priority(thread, thread_mode_background_begin):
+            set_thread_priority(thread, thread_priority_below_normal)
+
+
+def raise_current_thread_priority() -> None:
+    if sys.platform != "win32":
+        return
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_current_thread = kernel32.GetCurrentThread
+        set_thread_priority = kernel32.SetThreadPriority
+        thread = get_current_thread()
+        thread_priority_highest = 2
+        thread_priority_above_normal = 1
+        if not set_thread_priority(thread, thread_priority_highest):
+            set_thread_priority(thread, thread_priority_above_normal)
 
 
 def recording_file_stem() -> str:
@@ -338,28 +372,16 @@ def extract_action_items(sentences: list[str], limit: int = 8) -> list[str]:
     return action_items
 
 
-def wav_has_audio(path: Path, threshold: float = MIN_TRANSCRIBE_RMS) -> bool:
-    if not path.exists() or path.stat().st_size == 0:
-        return False
-    with contextlib.suppress(Exception):
-        with wave.open(str(path), "rb") as wav_file:
-            frame_count = wav_file.getnframes()
-            if frame_count <= 0:
-                return False
-            frames_per_read = max(1, wav_file.getframerate() * 5)
-            total_square = 0.0
-            total_count = 0
-            while total_count < frame_count:
-                frames = wav_file.readframes(frames_per_read)
-                if not frames:
-                    break
-                audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-                total_square += float(np.sum(audio * audio))
-                total_count += audio.size
-        if total_count <= 0:
-            return False
-        return float(np.sqrt(total_square / total_count)) >= threshold
-    return False
+def usable_model_dir(path: Path) -> bool:
+    return path.exists() and (path / "config.json").exists() and (path / "model.bin").exists()
+
+
+def whisper_model_path() -> str:
+    if usable_model_dir(LOCAL_MODEL_DIR):
+        return str(LOCAL_MODEL_DIR)
+    if usable_model_dir(FALLBACK_MODEL_DIR):
+        return str(FALLBACK_MODEL_DIR)
+    return WHISPER_MODEL
 
 
 @dataclass
@@ -370,8 +392,6 @@ class AudioFrameSet:
 @dataclass
 class TranscriptJob:
     source_name: str
-    start: float
-    end: float
     audio: np.ndarray
 
 
@@ -379,7 +399,6 @@ class TranscriptJob:
 class ReviewJob:
     source_name: str
     start: float
-    end: float
     audio: np.ndarray
 
 
@@ -394,45 +413,37 @@ class TranscriptEntry:
     start: float
     source_name: str
     text: str
-    end: float = 0.0
 
 
 @dataclass
 class RecordingSession:
     file_stem: str
-    temp_dir: tempfile.TemporaryDirectory[str]
-    mp3_path: Path
-    wav_path: Path
-    source_wav_paths: dict[str, Path]
-    text_path: Path
     stop_event: threading.Event = field(default_factory=threading.Event)
     active_event: threading.Event = field(default_factory=threading.Event)
     audio_queue: "queue.Queue[Optional[TranscriptJob]]" = field(default_factory=queue.Queue)
     review_queue: "queue.Queue[Optional[ReviewJob]]" = field(default_factory=queue.Queue)
     minutes_queue: "queue.Queue[Optional[str]]" = field(default_factory=queue.Queue)
     mp3_queue: "queue.Queue[Optional[AudioFrameSet]]" = field(default_factory=queue.Queue)
+    mp3_buffer: io.BytesIO = field(default_factory=io.BytesIO)
+    transcription_source_queue: "queue.Queue[Optional[AudioFrameSet]]" = field(
+        default_factory=lambda: queue.Queue(maxsize=TRANSCRIPTION_SOURCE_QUEUE_MAXSIZE)
+    )
     recorder_thread: Optional[threading.Thread] = None
     writer_thread: Optional[threading.Thread] = None
+    transcription_preparer_thread: Optional[threading.Thread] = None
     transcription_thread: Optional[threading.Thread] = None
-    review_thread: Optional[threading.Thread] = None
     transcription_result_thread: Optional[threading.Thread] = None
+    review_thread: Optional[threading.Thread] = None
     minutes_thread: Optional[threading.Thread] = None
     transcriber_input_queue: Optional[object] = None
     transcriber_output_queue: Optional[object] = None
-    transcriber_cancel_realtime_event: Optional[object] = None
     transcriber_process: Optional[object] = None
-    transcriber_stop_sent: bool = False
-    transcriber_lock: threading.Lock = field(default_factory=threading.Lock)
-    draft_entries: list[TranscriptEntry] = field(default_factory=list)
     final_entries: list[TranscriptEntry] = field(default_factory=list)
-    finalized_until: dict[str, float] = field(default_factory=lambda: {source: 0.0 for source in AUDIO_SOURCES})
     final_lock: threading.Lock = field(default_factory=threading.Lock)
-    saved_text_path: Optional[Path] = None
-    save_decision_event: threading.Event = field(default_factory=threading.Event)
 
     def cleanup(self) -> None:
         with contextlib.suppress(Exception):
-            self.temp_dir.cleanup()
+            self.mp3_buffer.close()
 
 
 class TranscriptWindow:
@@ -522,6 +533,8 @@ class MeetingRecorderApp:
         self.transcript_text = ""
         self.transcript_lock = threading.Lock()
         self.transcription_warning_shown = False
+        self.whisper_model = None
+        self.whisper_model_lock = threading.Lock()
         self.auto_screenshot_enabled = False
         self.screenshot_dir: Optional[Path] = None
         self.screenshot_lock = threading.Lock()
@@ -782,6 +795,7 @@ class MeetingRecorderApp:
         if session is not None:
             session.stop_event.set()
             session.active_event.set()
+            self.stop_transcription_source_queue(session)
             self.cancel_pending_transcription(session)
             session.review_queue.put(None)
             self.cancel_pending_minutes(session)
@@ -799,11 +813,13 @@ class MeetingRecorderApp:
                 session.recorder_thread.join(timeout=4)
             if session.writer_thread is not None:
                 session.writer_thread.join(timeout=4)
+            if session.transcription_preparer_thread is not None:
+                session.transcription_preparer_thread.join(timeout=2)
             if session.transcription_thread is not None:
                 session.transcription_thread.join(timeout=1)
             if session.review_thread is not None:
                 session.review_thread.join(timeout=4)
-            self.stop_transcriber_process(session, timeout=2, terminate=True)
+            self.stop_transcriber_process(session, timeout=1, terminate=True)
             if session.minutes_thread is not None:
                 session.minutes_thread.join(timeout=1)
             session.cleanup()
@@ -864,28 +880,18 @@ class MeetingRecorderApp:
             )
             return
 
-        auto_screenshot_requested = messagebox.askyesno(
-            self.title(),
-            self.t("ask_auto_screenshot"),
-        )
-        self.set_auto_screenshot_enabled(auto_screenshot_requested)
+        if AUDIO_ONLY_DIAGNOSTIC:
+            self.set_auto_screenshot_enabled(False)
+        else:
+            auto_screenshot_requested = messagebox.askyesno(
+                self.title(),
+                self.t("ask_auto_screenshot"),
+            )
+            self.set_auto_screenshot_enabled(auto_screenshot_requested)
 
         file_stem = recording_file_stem()
-        temp_dir = tempfile.TemporaryDirectory(prefix="local_meeting_recorder_")
-        temp_root = Path(temp_dir.name)
-        session = RecordingSession(
-            file_stem=file_stem,
-            temp_dir=temp_dir,
-            mp3_path=temp_root / f"{file_stem}.mp3",
-            wav_path=temp_root / f"{file_stem}.wav",
-            source_wav_paths={
-                "source_speaker": temp_root / f"{file_stem}.speaker.wav",
-                "source_microphone": temp_root / f"{file_stem}.microphone.wav",
-            },
-            text_path=temp_root / f"{file_stem}.txt",
-        )
+        session = RecordingSession(file_stem=file_stem)
         session.active_event.set()
-        session.text_path.write_text("", encoding="utf-8")
 
         self.clear_transcript()
         if self.transcript_window is not None:
@@ -895,7 +901,6 @@ class MeetingRecorderApp:
         with self.state_lock:
             self.state = "recording"
         self.update_tray_menu()
-        self.start_transcriber_process(session)
 
         session.recorder_thread = threading.Thread(
             target=self.recording_worker,
@@ -909,29 +914,45 @@ class MeetingRecorderApp:
             name="mp3-writer",
             daemon=True,
         )
-        session.transcription_thread = threading.Thread(
-            target=self.transcription_worker,
-            args=(session,),
-            name="transcriber",
-            daemon=True,
-        )
-        session.review_thread = threading.Thread(
-            target=self.review_transcription_worker,
-            args=(session,),
-            name="review-transcriber",
-            daemon=True,
-        )
-        session.minutes_thread = threading.Thread(
-            target=self.meeting_minutes_worker,
-            args=(session,),
-            name="meeting-minutes",
-            daemon=True,
+        if not AUDIO_ONLY_DIAGNOSTIC:
+            self.start_transcriber_process(session)
+            session.transcription_preparer_thread = threading.Thread(
+                target=self.transcription_preparer_worker,
+                args=(session,),
+                name="transcription-preparer",
+                daemon=True,
+            )
+            session.transcription_thread = threading.Thread(
+                target=self.transcription_worker,
+                args=(session,),
+                name="transcription-relay",
+                daemon=True,
+            )
+            if ENABLE_BACKGROUND_REVIEW:
+                session.review_thread = threading.Thread(
+                    target=self.review_transcription_worker,
+                    args=(session,),
+                    name="review-transcriber",
+                    daemon=True,
+                )
+            session.minutes_thread = threading.Thread(
+                target=self.meeting_minutes_worker,
+                args=(session,),
+                name="meeting-minutes",
+                daemon=True,
         )
         session.recorder_thread.start()
         session.writer_thread.start()
-        session.transcription_thread.start()
-        session.review_thread.start()
-        session.minutes_thread.start()
+        if session.transcription_preparer_thread is not None:
+            session.transcription_preparer_thread.start()
+        if session.transcription_result_thread is not None:
+            session.transcription_result_thread.start()
+        if session.transcription_thread is not None:
+            session.transcription_thread.start()
+        if session.review_thread is not None:
+            session.review_thread.start()
+        if session.minutes_thread is not None:
+            session.minutes_thread.start()
 
     def stop_recording(self) -> None:
         session = self.session
@@ -948,6 +969,7 @@ class MeetingRecorderApp:
         self.set_auto_screenshot_enabled(False)
         session.stop_event.set()
         session.active_event.set()
+        self.stop_transcription_source_queue(session)
         self.cancel_pending_transcription(session)
         with self.state_lock:
             self.state = "stopping"
@@ -962,33 +984,20 @@ class MeetingRecorderApp:
 
     def recording_worker(self, session: RecordingSession) -> None:
         source_threads: list[threading.Thread] = []
-        transcription_buffers: dict[str, list[np.ndarray]] = {source: [] for source in AUDIO_SOURCES}
-        buffered_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
-        transcription_start_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
-        source_stream_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
-        review_buffers: dict[str, list[np.ndarray]] = {source: [] for source in AUDIO_SOURCES}
-        review_buffered_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
-        review_start_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
-        review_frames = int(TRANSCRIBE_SAMPLE_RATE * REVIEW_SECONDS)
-        review_overlap_frames = int(TRANSCRIBE_SAMPLE_RATE * REVIEW_OVERLAP_SECONDS)
-        review_min_frames = int(TRANSCRIBE_SAMPLE_RATE * REVIEW_MIN_AUDIO_SECONDS)
 
         try:
             import soundcard as sc
 
             speaker = sc.default_speaker()
-            microphone = sc.default_microphone()
             loopback = sc.get_microphone(speaker.name, include_loopback=True)
 
             chunk_frames = max(1, int(RECORD_SAMPLE_RATE * CHUNK_SECONDS))
-            transcribe_frames = int(TRANSCRIBE_SAMPLE_RATE * TRANSCRIBE_SECONDS)
-            zero_chunk = np.zeros(chunk_frames, dtype=np.float32)
 
             source_queues: dict[str, "queue.Queue[Optional[np.ndarray]]"] = {source: queue.Queue() for source in AUDIO_SOURCES}
             source_done = {name: False for name in source_queues}
             source_errors: "queue.Queue[tuple[str, Exception]]" = queue.Queue()
 
-            for source_name, source in (("source_speaker", loopback), ("source_microphone", microphone)):
+            for source_name, source in (("source_speaker", loopback),):
                 thread = threading.Thread(
                     target=self.audio_capture_worker,
                     args=(session, source_name, source, source_queues[source_name], source_errors),
@@ -1015,75 +1024,104 @@ class MeetingRecorderApp:
                 if audio.size == 0:
                     continue
 
-                session.mp3_queue.put(AudioFrameSet(chunks))
-
-                for source_name in AUDIO_SOURCES:
-                    source_audio = chunks.get(source_name, zero_chunk)
-                    transcript_audio = resample_audio(source_audio, RECORD_SAMPLE_RATE, TRANSCRIBE_SAMPLE_RATE)
-                    chunk_start_frame = source_stream_frames[source_name]
-                    source_stream_frames[source_name] += transcript_audio.size
-                    self.buffer_review_audio(
-                        session,
-                        source_name,
-                        transcript_audio,
-                        review_buffers,
-                        review_buffered_frames,
-                        review_start_frames,
-                        review_frames,
-                        review_overlap_frames,
-                    )
-
-                    if session.stop_event.is_set() or audio_rms(transcript_audio) < MIN_TRANSCRIBE_RMS:
-                        continue
-                    if not transcription_buffers[source_name]:
-                        transcription_start_frames[source_name] = chunk_start_frame
-                    transcription_buffers[source_name].append(transcript_audio)
-                    buffered_frames[source_name] += transcript_audio.size
-                    if buffered_frames[source_name] >= transcribe_frames:
-                        job_audio = np.concatenate(transcription_buffers[source_name])
-                        job_start_frame = transcription_start_frames[source_name]
-                        session.audio_queue.put(
-                            TranscriptJob(
-                                source_name,
-                                job_start_frame / TRANSCRIBE_SAMPLE_RATE,
-                                (job_start_frame + job_audio.size) / TRANSCRIBE_SAMPLE_RATE,
-                                job_audio,
-                            )
-                        )
-                        transcription_buffers[source_name].clear()
-                        buffered_frames[source_name] = 0
+                frame_set = AudioFrameSet(chunks)
+                session.mp3_queue.put(frame_set)
+                if not AUDIO_ONLY_DIAGNOSTIC:
+                    self.offer_transcription_source_frame(session, frame_set)
 
             if all(source_done.values()) and not session.stop_event.is_set():
                 raise RuntimeError(self.t("all_sources_unavailable"))
-
-            if not session.stop_event.is_set():
-                min_frames = int(TRANSCRIBE_SAMPLE_RATE * REALTIME_MIN_AUDIO_SECONDS)
-                for source_name, source_buffer in transcription_buffers.items():
-                    if buffered_frames[source_name] >= min_frames and source_buffer:
-                        job_audio = np.concatenate(source_buffer)
-                        job_start_frame = transcription_start_frames[source_name]
-                        session.audio_queue.put(
-                            TranscriptJob(
-                                source_name,
-                                job_start_frame / TRANSCRIBE_SAMPLE_RATE,
-                                (job_start_frame + job_audio.size) / TRANSCRIBE_SAMPLE_RATE,
-                                job_audio,
-                            )
-                        )
         except Exception as exc:
             self.root.after(0, lambda error=exc: self.handle_recording_error(session, error))
         finally:
             session.stop_event.set()
             for thread in source_threads:
                 thread.join(timeout=2)
-            self.flush_review_buffers(
-                session,
-                review_buffers,
-                review_buffered_frames,
-                review_start_frames,
-                review_min_frames,
-            )
             session.mp3_queue.put(None)
+            if not AUDIO_ONLY_DIAGNOSTIC:
+                self.stop_transcription_source_queue(session)
+
+    def offer_transcription_source_frame(self, session: RecordingSession, frame_set: AudioFrameSet) -> None:
+        try:
+            session.transcription_source_queue.put_nowait(frame_set)
+            return
+        except queue.Full:
+            pass
+
+        with contextlib.suppress(queue.Empty):
+            session.transcription_source_queue.get_nowait()
+        with contextlib.suppress(queue.Full):
+            session.transcription_source_queue.put_nowait(frame_set)
+
+    def stop_transcription_source_queue(self, session: RecordingSession) -> None:
+        with contextlib.suppress(queue.Full):
+            session.transcription_source_queue.put_nowait(None)
+
+    def transcription_preparer_worker(self, session: RecordingSession) -> None:
+        lower_current_thread_priority()
+        transcription_buffers: dict[str, list[np.ndarray]] = {source: [] for source in AUDIO_SOURCES}
+        buffered_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
+        review_buffers: dict[str, list[np.ndarray]] = {source: [] for source in AUDIO_SOURCES}
+        review_buffered_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
+        review_start_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
+        transcribe_frames = int(TRANSCRIBE_SAMPLE_RATE * TRANSCRIBE_SECONDS)
+        review_frames = int(TRANSCRIBE_SAMPLE_RATE * REVIEW_SECONDS)
+        review_min_frames = int(TRANSCRIBE_SAMPLE_RATE * REVIEW_MIN_AUDIO_SECONDS)
+        min_frames = int(TRANSCRIBE_SAMPLE_RATE * REALTIME_MIN_AUDIO_SECONDS)
+
+        try:
+            while True:
+                try:
+                    frame_set = session.transcription_source_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if session.stop_event.is_set():
+                        break
+                    continue
+
+                if frame_set is None or session.stop_event.is_set():
+                    break
+                if not session.active_event.wait(0.1):
+                    continue
+
+                for source_name in AUDIO_SOURCES:
+                    source_audio = frame_set.sources.get(source_name)
+                    if source_audio is None or source_audio.size == 0:
+                        continue
+
+                    transcript_audio = resample_audio(source_audio, RECORD_SAMPLE_RATE, TRANSCRIBE_SAMPLE_RATE)
+                    if ENABLE_BACKGROUND_REVIEW:
+                        self.buffer_review_audio(
+                            session,
+                            source_name,
+                            transcript_audio,
+                            review_buffers,
+                            review_buffered_frames,
+                            review_start_frames,
+                            review_frames,
+                        )
+
+                    if audio_rms(transcript_audio) < MIN_TRANSCRIBE_RMS:
+                        continue
+                    transcription_buffers[source_name].append(transcript_audio)
+                    buffered_frames[source_name] += transcript_audio.size
+                    if buffered_frames[source_name] >= transcribe_frames:
+                        session.audio_queue.put(TranscriptJob(source_name, np.concatenate(transcription_buffers[source_name])))
+                        transcription_buffers[source_name].clear()
+                        buffered_frames[source_name] = 0
+
+            if not session.stop_event.is_set():
+                for source_name, source_buffer in transcription_buffers.items():
+                    if buffered_frames[source_name] >= min_frames and source_buffer:
+                        session.audio_queue.put(TranscriptJob(source_name, np.concatenate(source_buffer)))
+        finally:
+            if ENABLE_BACKGROUND_REVIEW and not session.stop_event.is_set():
+                self.flush_review_buffers(
+                    session,
+                    review_buffers,
+                    review_buffered_frames,
+                    review_start_frames,
+                    review_min_frames,
+                )
             session.audio_queue.put(None)
             session.review_queue.put(None)
 
@@ -1096,13 +1134,12 @@ class MeetingRecorderApp:
         review_buffered_frames: dict[str, int],
         review_start_frames: dict[str, int],
         target_frames: int,
-        overlap_frames: int,
     ) -> None:
         if audio.size == 0:
             return
         review_buffers[source_name].append(audio)
         review_buffered_frames[source_name] += audio.size
-        while review_buffered_frames[source_name] >= target_frames:
+        if review_buffered_frames[source_name] >= target_frames:
             self.flush_review_buffer(
                 session,
                 source_name,
@@ -1110,7 +1147,6 @@ class MeetingRecorderApp:
                 review_buffered_frames,
                 review_start_frames,
                 target_frames,
-                overlap_frames=overlap_frames,
             )
 
     def flush_review_buffers(
@@ -1129,7 +1165,6 @@ class MeetingRecorderApp:
                 review_buffered_frames,
                 review_start_frames,
                 min_frames,
-                final=True,
             )
 
     def flush_review_buffer(
@@ -1140,40 +1175,19 @@ class MeetingRecorderApp:
         review_buffered_frames: dict[str, int],
         review_start_frames: dict[str, int],
         min_frames: int,
-        overlap_frames: int = 0,
-        final: bool = False,
     ) -> None:
         source_buffer = review_buffers[source_name]
         if not source_buffer:
             return
 
         audio = np.concatenate(source_buffer)
-        if final:
-            review_start_frames[source_name] += audio.size
-            review_buffers[source_name] = []
-            review_buffered_frames[source_name] = 0
-            if audio.size < min_frames or audio_rms(audio) < MIN_TRANSCRIBE_RMS:
-                return
-            start = (review_start_frames[source_name] - audio.size) / TRANSCRIBE_SAMPLE_RATE
-            end = review_start_frames[source_name] / TRANSCRIBE_SAMPLE_RATE
-            session.review_queue.put(ReviewJob(source_name, start, end, audio))
-            return
+        start = review_start_frames[source_name] / TRANSCRIBE_SAMPLE_RATE
+        review_start_frames[source_name] += audio.size
+        review_buffers[source_name] = []
+        review_buffered_frames[source_name] = 0
 
-        if audio.size < min_frames:
-            return
-
-        job_audio = audio[:min_frames]
-        start_frame = review_start_frames[source_name]
-        advance_frames = max(1, min(job_audio.size, job_audio.size - overlap_frames))
-        review_start_frames[source_name] += advance_frames
-        remaining = audio[advance_frames:]
-        review_buffers[source_name] = [remaining] if remaining.size else []
-        review_buffered_frames[source_name] = int(remaining.size)
-
-        if audio_rms(job_audio) >= MIN_TRANSCRIBE_RMS:
-            start = start_frame / TRANSCRIBE_SAMPLE_RATE
-            end = (start_frame + job_audio.size) / TRANSCRIBE_SAMPLE_RATE
-            session.review_queue.put(ReviewJob(source_name, start, end, job_audio))
+        if audio.size >= min_frames and audio_rms(audio) >= MIN_TRANSCRIBE_RMS:
+            session.review_queue.put(ReviewJob(source_name, start, audio))
 
     def collect_source_chunks(
         self,
@@ -1183,7 +1197,7 @@ class MeetingRecorderApp:
     ) -> dict[str, np.ndarray]:
         chunks: dict[str, np.ndarray] = {}
         pending = {name for name, done in source_done.items() if not done}
-        deadline = time.monotonic() + CHUNK_SECONDS + 0.25
+        deadline = time.monotonic() + CHUNK_SECONDS + CAPTURE_BLOCK_SECONDS + 0.25
 
         while pending and time.monotonic() < deadline:
             received = False
@@ -1198,7 +1212,7 @@ class MeetingRecorderApp:
                 if item is None:
                     source_done[source_name] = True
                 elif item.size:
-                    chunks[source_name] = fit_audio_length(item, chunk_frames)
+                    chunks[source_name] = normalize_audio(item)
 
             if pending and not received:
                 time.sleep(0.01)
@@ -1207,10 +1221,6 @@ class MeetingRecorderApp:
 
     def mp3_writer_worker(self, session: RecordingSession) -> None:
         encoder = None
-        mp3_file = None
-        wav_file = None
-        source_wav_files: dict[str, wave.Wave_write] = {}
-        chunk_frames = max(1, int(RECORD_SAMPLE_RATE * CHUNK_SECONDS))
 
         try:
             import lameenc
@@ -1220,18 +1230,6 @@ class MeetingRecorderApp:
             encoder.set_in_sample_rate(RECORD_SAMPLE_RATE)
             encoder.set_channels(CHANNELS)
             encoder.set_quality(2)
-            mp3_file = session.mp3_path.open("wb")
-
-            wav_file = wave.open(str(session.wav_path), "wb")
-            wav_file.setnchannels(CHANNELS)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(RECORD_SAMPLE_RATE)
-            for source_name, source_path in session.source_wav_paths.items():
-                source_file = wave.open(str(source_path), "wb")
-                source_file.setnchannels(CHANNELS)
-                source_file.setsampwidth(2)
-                source_file.setframerate(RECORD_SAMPLE_RATE)
-                source_wav_files[source_name] = source_file
 
             while True:
                 frame_set = session.mp3_queue.get()
@@ -1240,38 +1238,21 @@ class MeetingRecorderApp:
                 if not frame_set.sources:
                     continue
 
-                for source_name, source_file in source_wav_files.items():
-                    source_audio = frame_set.sources.get(source_name)
-                    if source_audio is None:
-                        source_audio = np.zeros(chunk_frames, dtype=np.float32)
-                    source_file.writeframes(float_audio_to_int16(source_audio).tobytes())
-
                 audio = mix_audio_sources(list(frame_set.sources.values()))
                 if audio.size == 0:
                     continue
                 pcm_bytes = float_audio_to_int16(audio).tobytes()
-                wav_file.writeframes(pcm_bytes)
 
                 mp3_chunk = encoder.encode(pcm_bytes)
                 if mp3_chunk:
-                    mp3_file.write(mp3_chunk)
+                    session.mp3_buffer.write(mp3_chunk)
 
             final_chunk = encoder.flush()
             if final_chunk:
-                mp3_file.write(final_chunk)
+                session.mp3_buffer.write(final_chunk)
         except Exception as exc:
             session.stop_event.set()
             self.root.after(0, lambda error=exc: self.handle_recording_error(session, error))
-        finally:
-            for source_file in source_wav_files.values():
-                with contextlib.suppress(Exception):
-                    source_file.close()
-            with contextlib.suppress(Exception):
-                if wav_file is not None:
-                    wav_file.close()
-            with contextlib.suppress(Exception):
-                if mp3_file is not None:
-                    mp3_file.close()
 
     def audio_capture_worker(
         self,
@@ -1281,17 +1262,38 @@ class MeetingRecorderApp:
         target_queue: "queue.Queue[Optional[np.ndarray]]",
         error_queue: "queue.Queue[tuple[str, Exception]]",
     ) -> None:
+        buffers: list[np.ndarray] = []
+        buffered_frames = 0
         try:
-            chunk_frames = max(1, int(RECORD_SAMPLE_RATE * CHUNK_SECONDS))
-            with source.recorder(samplerate=RECORD_SAMPLE_RATE, channels=CHANNELS) as recorder:
+            raise_current_thread_priority()
+            output_frames = max(1, int(RECORD_SAMPLE_RATE * CHUNK_SECONDS))
+            read_frames = max(1, int(RECORD_SAMPLE_RATE * CAPTURE_READ_SECONDS))
+            block_frames = max(read_frames * 4, int(RECORD_SAMPLE_RATE * CAPTURE_BLOCK_SECONDS))
+            with source.recorder(
+                samplerate=RECORD_SAMPLE_RATE,
+                channels=CHANNELS,
+                blocksize=block_frames,
+            ) as recorder:
                 while not session.stop_event.is_set():
-                    if not session.active_event.wait(0.1):
+                    if not session.active_event.wait(0.02):
                         continue
 
-                    data = recorder.record(numframes=chunk_frames)
+                    data = recorder.record(numframes=read_frames)
                     audio = normalize_audio(data)
-                    if audio.size:
-                        target_queue.put(fit_audio_length(audio, chunk_frames))
+                    if not audio.size:
+                        continue
+
+                    buffers.append(audio)
+                    buffered_frames += audio.size
+                    while buffered_frames >= output_frames:
+                        combined = np.concatenate(buffers)
+                        target_queue.put(combined[:output_frames].copy())
+                        remainder = combined[output_frames:]
+                        buffers = [remainder] if remainder.size else []
+                        buffered_frames = remainder.size
+
+            if buffered_frames:
+                target_queue.put(np.concatenate(buffers))
         except Exception as exc:
             error_queue.put((source_name, exc))
         finally:
@@ -1318,109 +1320,85 @@ class MeetingRecorderApp:
                     ),
                 )
 
-    def transcriber_config(self) -> dict[str, object]:
-        model_root = app_directory() / "models"
-        return {
-            "model": WHISPER_MODEL,
-            "local_model_dir": str(model_root / LOCAL_MODEL_DIR.name),
-            "fallback_model_dir": str(model_root / FALLBACK_MODEL_DIR.name),
-            "language": WHISPER_LANGUAGE,
-            "device": WHISPER_DEVICE,
-            "compute_type": WHISPER_COMPUTE_TYPE,
-            "cpu_threads": WHISPER_CPU_THREADS,
-            "num_workers": WHISPER_NUM_WORKERS,
-            "vad_parameters": VAD_PARAMETERS,
-        }
-
     def start_transcriber_process(self, session: RecordingSession) -> None:
         try:
             context = mp.get_context("spawn")
-            input_queue = context.Queue(maxsize=8)
-            output_queue = context.Queue()
-            cancel_realtime_event = context.Event()
-            process = context.Process(
+            session.transcriber_input_queue = context.Queue(maxsize=TRANSCRIBER_INPUT_QUEUE_MAXSIZE)
+            session.transcriber_output_queue = context.Queue(maxsize=TRANSCRIBER_OUTPUT_QUEUE_MAXSIZE)
+            config = {
+                "model_path": whisper_model_path(),
+                "device": WHISPER_DEVICE,
+                "compute_type": WHISPER_COMPUTE_TYPE,
+                "cpu_threads": WHISPER_CPU_THREADS,
+                "num_workers": WHISPER_NUM_WORKERS,
+                "language": WHISPER_LANGUAGE,
+                "vad_parameters": VAD_PARAMETERS,
+            }
+            session.transcriber_process = context.Process(
                 target=run_transcriber_process,
-                args=(input_queue, output_queue, self.transcriber_config(), cancel_realtime_event),
+                args=(session.transcriber_input_queue, session.transcriber_output_queue, config),
                 name="whisper-transcriber",
                 daemon=True,
             )
-            process.start()
+            session.transcriber_process.start()
+            session.transcription_result_thread = threading.Thread(
+                target=self.transcription_result_worker,
+                args=(session,),
+                name="transcription-results",
+                daemon=True,
+            )
         except Exception as exc:
+            self.close_transcriber_queues(session)
             self.root.after(0, lambda error=exc: self.show_transcription_runtime_warning(error))
-            return
 
-        session.transcriber_input_queue = input_queue
-        session.transcriber_output_queue = output_queue
-        session.transcriber_cancel_realtime_event = cancel_realtime_event
-        session.transcriber_process = process
-        session.transcription_result_thread = threading.Thread(
-            target=self.transcription_result_worker,
-            args=(session,),
-            name="transcriber-results",
-            daemon=True,
-        )
-        session.transcription_result_thread.start()
-
-    def submit_transcriber_job(self, session: RecordingSession, payload: dict[str, object]) -> bool:
-        input_queue = session.transcriber_input_queue
-        process = session.transcriber_process
-        if input_queue is None or process is None:
-            return False
-
-        while True:
-            if getattr(process, "exitcode", None) is not None:
-                return False
-            try:
-                input_queue.put(payload, timeout=0.2)
-                return True
-            except queue.Full:
-                if self.shutting_down:
-                    return False
-
-    def signal_transcriber_stop(self, session: RecordingSession, timeout: Optional[float] = None) -> bool:
+    def submit_transcriber_job(self, session: RecordingSession, job: dict[str, object]) -> None:
         input_queue = session.transcriber_input_queue
         if input_queue is None:
-            return False
-        with session.transcriber_lock:
-            if session.transcriber_stop_sent:
-                return True
-            deadline = None if timeout is None else time.monotonic() + timeout
-            while True:
-                try:
-                    input_queue.put(None, timeout=0.2)
-                    session.transcriber_stop_sent = True
-                    return True
-                except queue.Full:
-                    if deadline is not None and time.monotonic() >= deadline:
-                        return False
-                except Exception:
-                    return False
+            return
+        try:
+            input_queue.put_nowait(job)
+            return
+        except queue.Full:
+            pass
 
-    def stop_transcriber_process(
-        self,
-        session: RecordingSession,
-        timeout: Optional[float] = None,
-        terminate: bool = False,
-    ) -> None:
-        self.signal_transcriber_stop(session, timeout=2 if terminate else None)
+        with contextlib.suppress(queue.Empty):
+            input_queue.get_nowait()
+        with contextlib.suppress(queue.Full):
+            input_queue.put_nowait(job)
+
+    def signal_transcriber_stop(self, session: RecordingSession) -> None:
+        input_queue = session.transcriber_input_queue
+        if input_queue is None:
+            return
+        try:
+            input_queue.put_nowait(None)
+            return
+        except queue.Full:
+            pass
+
+        with contextlib.suppress(queue.Empty):
+            input_queue.get_nowait()
+        with contextlib.suppress(queue.Full):
+            input_queue.put_nowait(None)
+
+    def stop_transcriber_process(self, session: RecordingSession, timeout: float = 2.0, terminate: bool = False) -> None:
+        self.signal_transcriber_stop(session)
+
         process = session.transcriber_process
         if process is not None:
             process.join(timeout=timeout)
             if terminate and process.is_alive():
                 with contextlib.suppress(Exception):
                     process.terminate()
-                process.join(timeout=2)
+                process.join(timeout=1)
+            with contextlib.suppress(Exception):
+                process.close()
+            session.transcriber_process = None
 
         result_thread = session.transcription_result_thread
         if result_thread is not None and result_thread is not threading.current_thread():
             result_thread.join(timeout=timeout)
-        if process is not None:
-            with contextlib.suppress(Exception):
-                process.close()
-            session.transcriber_process = None
         session.transcription_result_thread = None
-        session.transcriber_cancel_realtime_event = None
-
         self.close_transcriber_queues(session)
 
     def close_transcriber_queues(self, session: RecordingSession) -> None:
@@ -1435,6 +1413,7 @@ class MeetingRecorderApp:
             setattr(session, queue_name, None)
 
     def transcription_result_worker(self, session: RecordingSession) -> None:
+        lower_current_thread_priority()
         output_queue = session.transcriber_output_queue
         if output_queue is None:
             return
@@ -1467,62 +1446,66 @@ class MeetingRecorderApp:
             if kind == "realtime":
                 text = str(result.get("text", "")).strip()
                 source_name = str(result.get("source_name", "source_speaker"))
-                start = float(result.get("start", 0.0))
-                end = float(result.get("end", start))
                 if text and not session.stop_event.is_set():
-                    self.append_transcript(session, source_name, start, end, text)
-                continue
-            if kind == "review":
-                source_name = str(result.get("source_name", "source_speaker"))
-                start = float(result.get("start", 0.0))
-                end = float(result.get("end", start))
-                entries: list[TranscriptEntry] = []
-                for item in result.get("entries", []):
-                    if len(item) == 3:
-                        entry_start, entry_end, text = item
-                    else:
-                        entry_start, text = item
-                        entry_end = entry_start
-                    if str(text).strip():
-                        entries.append(TranscriptEntry(float(entry_start), source_name, str(text), float(entry_end)))
-                if end > start:
-                    self.apply_final_transcript_entries(session, source_name, start, end, entries)
+                    self.append_transcript(session, source_name, text)
+
+    def get_whisper_model(self) -> object:
+        with self.whisper_model_lock:
+            if self.whisper_model is None:
+                from faster_whisper import WhisperModel
+
+                self.whisper_model = WhisperModel(
+                    whisper_model_path(),
+                    device=WHISPER_DEVICE,
+                    compute_type=WHISPER_COMPUTE_TYPE,
+                    cpu_threads=WHISPER_CPU_THREADS,
+                    num_workers=WHISPER_NUM_WORKERS,
+                )
+            return self.whisper_model
 
     def transcription_worker(self, session: RecordingSession) -> None:
+        lower_current_thread_priority()
         if session.transcriber_input_queue is None:
             self.drain_audio_queue(session.audio_queue)
             return
 
-        while True:
-            if not session.active_event.wait(0.1):
-                continue
+        try:
+            while not session.stop_event.is_set():
+                if not session.active_event.wait(0.1):
+                    continue
 
-            try:
-                job = session.audio_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
+                try:
+                    job = session.audio_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
 
-            if job is None:
-                break
-            audio = job.audio
-            if audio.size == 0:
-                continue
+                if job is None:
+                    break
+                audio = job.audio
+                if audio.size == 0:
+                    continue
 
-            self.submit_transcriber_job(
-                session,
-                {
-                    "kind": "realtime",
-                    "source_name": job.source_name,
-                    "start": job.start,
-                    "end": job.end,
-                    "audio": audio,
-                    "beam_size": REALTIME_BEAM_SIZE,
-                    "condition_on_previous_text": False,
-                },
-            )
+                self.submit_transcriber_job(
+                    session,
+                    {
+                        "source_name": job.source_name,
+                        "audio": audio,
+                        "beam_size": REALTIME_BEAM_SIZE,
+                    },
+                )
+        finally:
+            self.signal_transcriber_stop(session)
 
     def review_transcription_worker(self, session: RecordingSession) -> None:
-        if session.transcriber_input_queue is None:
+        lower_current_thread_priority()
+        try:
+            model = self.get_whisper_model()
+        except ImportError:
+            self.root.after(0, self.show_transcription_dependency_warning)
+            self.drain_audio_queue(session.review_queue)
+            return
+        except Exception as exc:
+            self.root.after(0, lambda error=exc: self.show_transcription_runtime_warning(error))
             self.drain_audio_queue(session.review_queue)
             return
 
@@ -1535,20 +1518,30 @@ class MeetingRecorderApp:
             if audio.size == 0 or audio_rms(audio) < MIN_TRANSCRIBE_RMS:
                 continue
 
-            self.submit_transcriber_job(
-                session,
-                {
-                    "kind": "review",
-                    "source_name": job.source_name,
-                    "start": job.start,
-                    "end": job.end,
-                    "audio": audio,
-                    "beam_size": FINAL_BEAM_SIZE,
-                    "condition_on_previous_text": True,
-                },
-            )
+            try:
+                segments, _info = model.transcribe(
+                    audio,
+                    beam_size=FINAL_BEAM_SIZE,
+                    language=WHISPER_LANGUAGE,
+                    vad_filter=True,
+                    vad_parameters=VAD_PARAMETERS,
+                    condition_on_previous_text=True,
+                )
+                entries = [
+                    TranscriptEntry(job.start + float(segment.start), job.source_name, value)
+                    for segment in segments
+                    if (value := segment.text.strip())
+                ]
+            except Exception as exc:
+                self.root.after(0, lambda error=exc: self.show_transcription_runtime_warning(error))
+                continue
+
+            if entries:
+                with session.final_lock:
+                    session.final_entries.extend(entries)
 
     def meeting_minutes_worker(self, session: RecordingSession) -> None:
+        lower_current_thread_priority()
         while True:
             transcript = session.minutes_queue.get()
             if transcript is None:
@@ -1604,14 +1597,9 @@ class MeetingRecorderApp:
             document = self.compose_transcript_document(self.transcript_body_text, self.meeting_minutes_text)
             self.transcript_text = document
 
-        session.text_path.write_text(document, encoding="utf-8")
         self.root.after(0, lambda active_session=session, current_text=document: self.refresh_transcript_text(active_session, current_text))
 
     def cancel_pending_transcription(self, session: RecordingSession) -> None:
-        cancel_event = session.transcriber_cancel_realtime_event
-        if cancel_event is not None:
-            with contextlib.suppress(Exception):
-                cancel_event.set()
         while True:
             try:
                 session.audio_queue.get_nowait()
@@ -1630,142 +1618,33 @@ class MeetingRecorderApp:
             session.recorder_thread.join()
         if session.writer_thread is not None:
             session.writer_thread.join()
-
-        finalizer_thread = threading.Thread(
-            target=self.finish_final_transcript_worker,
-            args=(session,),
-            name="finish-final-transcript",
-            daemon=True,
-        )
-        finalizer_thread.start()
-        finalizer_thread.join(timeout=STOP_FINAL_WAIT_SECONDS)
-
-        self.root.after(0, lambda: self.complete_stop(session))
-        try:
-            finalizer_thread.join()
-            self.update_saved_text_file(session)
-        finally:
-            session.save_decision_event.wait()
-            session.cleanup()
-
-    def finish_final_transcript_worker(self, session: RecordingSession) -> None:
+        if session.transcription_preparer_thread is not None:
+            session.transcription_preparer_thread.join(timeout=2)
+        if session.transcription_thread is not None:
+            session.transcription_thread.join(timeout=2)
+        if session.review_thread is not None:
+            session.review_thread.join(timeout=2)
+        self.stop_transcriber_process(session, timeout=2, terminate=True)
         self.cancel_pending_minutes(session)
         if session.minutes_thread is not None:
-            session.minutes_thread.join()
-
-        if session.transcription_thread is not None:
-            session.transcription_thread.join()
-        if session.review_thread is not None:
-            session.review_thread.join()
-        self.stop_transcriber_process(session)
+            session.minutes_thread.join(timeout=1)
         self.finalize_transcript_from_review(session)
+        self.root.after(0, lambda: self.complete_stop(session))
 
     def finalize_transcript_from_review(self, session: RecordingSession) -> None:
-        transcript = self.format_final_transcript(session)
-        if not transcript:
-            transcript = self.format_layered_transcript(session)
+        with session.final_lock:
+            entries = list(session.final_entries)
 
-        summary_source = self.strip_layer_headers(transcript)
-        summary = self.build_meeting_summary(summary_source)
+        transcript = self.format_transcript_entries(entries)
+        if not transcript:
+            with self.transcript_lock:
+                transcript = self.transcript_body_text or self.transcript_without_existing_minutes(self.transcript_text)
+
+        summary = self.build_meeting_summary(transcript)
         document = transcript
         if summary:
             document = f"{transcript}\n\n{summary}" if transcript else summary
         self.replace_transcript_document(session, document)
-        self.sync_saved_text_file_if_available(session)
-
-    def update_saved_text_file(self, session: RecordingSession) -> None:
-        session.save_decision_event.wait()
-        text_target = session.saved_text_path
-        if text_target is None or not session.text_path.exists():
-            return
-        with contextlib.suppress(Exception):
-            shutil.copy2(session.text_path, text_target)
-
-    def sync_saved_text_file_if_available(self, session: RecordingSession) -> None:
-        text_target = session.saved_text_path
-        if text_target is None or not session.text_path.exists():
-            return
-        with contextlib.suppress(Exception):
-            shutil.copy2(session.text_path, text_target)
-
-    def strip_layer_headers(self, transcript: str) -> str:
-        return "\n".join(
-            line
-            for line in transcript.splitlines()
-            if line.strip() not in {"[Draft]", "[Final]"}
-        ).strip()
-
-    def format_final_transcript(self, session: RecordingSession) -> str:
-        with session.final_lock:
-            entries = list(session.final_entries)
-        return self.format_transcript_entries(entries)
-
-    def format_layered_transcript(self, session: RecordingSession, final_only: bool = False) -> str:
-        with session.final_lock:
-            final_entries = list(session.final_entries)
-            finalized_until = dict(session.finalized_until)
-            draft_entries = list(session.draft_entries)
-
-        final_text = self.format_transcript_entries(final_entries)
-        if final_only:
-            return final_text
-
-        draft_tail = [
-            entry
-            for entry in draft_entries
-            if entry.start >= finalized_until.get(entry.source_name, 0.0) - 0.05
-        ]
-        draft_text = self.format_transcript_entries(draft_tail)
-
-        sections: list[str] = []
-        if final_text:
-            sections.append(f"[Final]\n{final_text}")
-        if draft_text:
-            sections.append(f"[Draft]\n{draft_text}")
-        return "\n\n".join(sections)
-
-    def apply_final_transcript_entries(
-        self,
-        session: RecordingSession,
-        source_name: str,
-        start: float,
-        end: float,
-        entries: list[TranscriptEntry],
-    ) -> None:
-        with session.final_lock:
-            session.final_entries = [
-                entry
-                for entry in session.final_entries
-                if not (
-                    entry.source_name == source_name
-                    and start - 0.05 <= entry.start < end + 0.05
-                )
-            ]
-            session.final_entries.extend(entries)
-            session.finalized_until[source_name] = max(
-                session.finalized_until.get(source_name, 0.0),
-                end,
-            )
-            session.draft_entries = [
-                entry
-                for entry in session.draft_entries
-                if entry.start >= session.finalized_until.get(entry.source_name, 0.0) - 0.05
-            ]
-
-        transcript = self.format_layered_transcript(session)
-        document = transcript
-        if self.session is session:
-            with self.transcript_lock:
-                if self.session is session:
-                    self.transcript_body_text = transcript
-                    document = self.compose_transcript_document(self.transcript_body_text, self.meeting_minutes_text)
-                    self.transcript_text = document
-
-        session.text_path.write_text(document, encoding="utf-8")
-        self.sync_saved_text_file_if_available(session)
-        if self.session is session:
-            self.queue_minutes_update(session, self.strip_layer_headers(transcript))
-            self.root.after(0, lambda active_session=session, current_text=document: self.refresh_transcript_text(active_session, current_text))
 
     def format_transcript_entries(self, entries: list[TranscriptEntry]) -> str:
         blocks: list[TranscriptBlock] = []
@@ -1840,8 +1719,6 @@ class MeetingRecorderApp:
             line = raw_line.strip()
             if not line:
                 continue
-            if line in {"[Draft]", "[Final]"}:
-                continue
             label = line.rstrip(":：").strip()
             if label in speaker_labels:
                 current_speaker = speaker_labels[label]
@@ -1910,27 +1787,30 @@ class MeetingRecorderApp:
 
     def complete_stop(self, session: RecordingSession) -> None:
         if self.session is not session:
-            session.save_decision_event.set()
             return
 
         with self.state_lock:
             self.state = "idle"
         self.update_tray_menu()
 
-        try:
-            if not self.shutting_down:
-                should_save = messagebox.askyesno(
-                    self.title(),
-                    self.t("save_question"),
-                )
-                if should_save:
-                    self.ask_and_save_files(session)
-        finally:
+        if self.shutting_down:
+            session.cleanup()
             self.session = None
             self.clear_transcript()
-            if self.transcript_window is not None:
-                self.transcript_window.set_text("")
-            session.save_decision_event.set()
+            return
+
+        should_save = messagebox.askyesno(
+            self.title(),
+            self.t("save_question"),
+        )
+        if should_save:
+            self.ask_and_save_files(session)
+
+        session.cleanup()
+        self.session = None
+        self.clear_transcript()
+        if self.transcript_window is not None:
+            self.transcript_window.set_text("")
 
     def ask_and_save_files(self, session: RecordingSession) -> None:
         while True:
@@ -1949,6 +1829,8 @@ class MeetingRecorderApp:
             else:
                 mp3_target = selected_path.with_suffix(".mp3")
             text_target = mp3_target.with_suffix(".txt")
+            with self.transcript_lock:
+                transcript = self.transcript_text
 
             if text_target.exists():
                 overwrite_text = messagebox.askyesno(
@@ -1959,12 +1841,8 @@ class MeetingRecorderApp:
                     continue
 
             try:
-                shutil.copy2(session.mp3_path, mp3_target)
-                if session.text_path.exists():
-                    shutil.copy2(session.text_path, text_target)
-                else:
-                    text_target.write_text("", encoding="utf-8")
-                session.saved_text_path = text_target
+                mp3_target.write_bytes(session.mp3_buffer.getvalue())
+                text_target.write_text(transcript, encoding="utf-8")
             except Exception as exc:
                 messagebox.showerror(self.title(), f"{self.t('save_failed')}\n{exc}")
                 continue
@@ -1975,14 +1853,7 @@ class MeetingRecorderApp:
             )
             return
 
-    def append_transcript(
-        self,
-        session: RecordingSession,
-        source_name: str,
-        start: float,
-        end: float,
-        text: str,
-    ) -> None:
+    def append_transcript(self, session: RecordingSession, source_name: str, text: str) -> None:
         if self.session is not session:
             return
 
@@ -1990,22 +1861,20 @@ class MeetingRecorderApp:
         if not sentences:
             return
 
-        with session.final_lock:
-            session.draft_entries.append(TranscriptEntry(start, source_name, text, end))
-
-        transcript = self.format_layered_transcript(session)
         with self.transcript_lock:
+            if self.transcript_blocks and self.transcript_blocks[-1].source_name == source_name:
+                self.transcript_blocks[-1].sentences.extend(sentences)
+            else:
+                self.transcript_blocks.append(TranscriptBlock(source_name, sentences))
+            transcript = self.format_transcript_blocks(self.transcript_blocks)
             self.transcript_body_text = transcript
             document = self.compose_transcript_document(self.transcript_body_text, self.meeting_minutes_text)
             self.transcript_text = document
 
-        session.text_path.write_text(document, encoding="utf-8")
-        self.queue_minutes_update(session, self.strip_layer_headers(transcript))
+        self.queue_minutes_update(session, transcript)
         self.root.after(0, lambda active_session=session, current_text=document: self.refresh_transcript_text(active_session, current_text))
 
     def replace_transcript_document(self, session: RecordingSession, text: str) -> None:
-        session.text_path.write_text(text, encoding="utf-8")
-        self.sync_saved_text_file_if_available(session)
         if self.session is not session:
             return
         with self.transcript_lock:
@@ -2109,13 +1978,8 @@ class MeetingRecorderApp:
         if self.session is not session:
             return
 
-        self.set_auto_screenshot_enabled(False)
         session.stop_event.set()
         session.active_event.set()
-        self.cancel_pending_transcription(session)
-        session.review_queue.put(None)
-        self.cancel_pending_minutes(session)
-        self.stop_transcriber_process(session, timeout=1, terminate=True)
         with self.state_lock:
             self.state = "idle"
         self.update_tray_menu()
