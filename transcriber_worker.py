@@ -29,11 +29,23 @@ def limit_native_threads() -> None:
         os.environ.setdefault(name, "1")
 
 
+def make_text_converter(config: dict[str, Any]) -> Any:
+    if not config.get("simplify_chinese", False):
+        return None
+    try:
+        from opencc import OpenCC
+
+        return OpenCC("t2s")
+    except Exception:
+        return None
+
+
 def run_transcriber_process(input_queue: Any, output_queue: Any, config: dict[str, Any]) -> None:
     lower_current_process_priority()
     limit_native_threads()
 
     model = None
+    text_converter = make_text_converter(config)
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -65,15 +77,19 @@ def run_transcriber_process(input_queue: Any, output_queue: Any, config: dict[st
                 continue
 
             try:
-                segments, _info = model.transcribe(
-                    audio,
-                    beam_size=int(job.get("beam_size", 1)),
-                    language=config["language"],
-                    vad_filter=True,
-                    vad_parameters=config["vad_parameters"],
-                    condition_on_previous_text=False,
-                )
+                transcribe_options = {
+                    "beam_size": int(job.get("beam_size", 1)),
+                    "language": config["language"],
+                    "vad_filter": True,
+                    "vad_parameters": config["vad_parameters"],
+                    "condition_on_previous_text": bool(config.get("condition_on_previous_text", False)),
+                }
+                if config.get("initial_prompt"):
+                    transcribe_options["initial_prompt"] = str(config["initial_prompt"])
+                segments, _info = model.transcribe(audio, **transcribe_options)
                 text = "".join(segment.text for segment in segments).strip()
+                if text and text_converter is not None:
+                    text = text_converter.convert(text).strip()
             except Exception as exc:
                 output_queue.put({"kind": "error", "message": str(exc)})
                 continue

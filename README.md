@@ -5,7 +5,7 @@
 - 🔴 Start Recording / ◼ Stop Recording
 - Text Window
 - Take a screenshot
-- Auto Screenshot On / Auto Screenshot Off
+- Auto Screenshot: On / Auto Screenshot: Off
 - About
 - Exit
 
@@ -27,13 +27,15 @@
 - MP3 和文本文件默认使用开始录音时的年月日时分作为文件名，例如 `20260912_1056.mp3` 和 `20260912_1056.txt`。
 - 点击 Text Window 会打开实时转写窗口；没有录音时窗口内容为空。
 - 文本窗口底部提供复制按钮，可以把窗口里的文本复制到剪贴板。
-- 实时转写使用 `faster-whisper`，默认模型为英文蒸馏模型 `distil-small.en`；实时文本默认每 3 秒处理一次，实时 `beam_size` 为 3，后台复核转写当前暂时关闭。
+- 点击 Start Recording 后会先选择本次转录语言和是否开启 Auto Screenshot；转录语言默认 English。
+- 实时转写使用 `faster-whisper`：English 使用英文蒸馏模型 `distil-small.en`，每 5 秒处理一次，实时 `beam_size` 为 5，`condition_on_previous_text=True`；中文使用多语言模型 `small` 并固定 `language="zh"`，每 10 秒处理一次，实时 `beam_size` 为 5，`condition_on_previous_text=True`，并加入简体中文和中文标点提示词；后台复核转写当前暂时关闭。
+- 中文模式会在转写结果返回后尝试使用 OpenCC 做繁体转简体；如果尚未安装 `opencc-python-reimplemented`，程序仍可运行，但不会强制繁转简。
 - 会议纪要会根据实时转写文本生成主要讨论和 action items。
 - 开始录音时会在程序或 exe 同级目录下创建一次 `screen\YYYYMMDD_HHMM\` 目录，同一次录音期间的手动和自动截图都保存到这个目录，截图文件名为 `YYYYMMDD_HHMMSS.jpg`。
 - 没有录音时，手动 Take a screenshot 会按当前年月日时分创建一个截图目录并保存截图。
-- 点击 Auto Screenshot Off 会开启自动截屏，菜单文字变为 Auto Screenshot On；开启后会立即截屏一次，之后每 30 秒截屏一次，不再缩小图片或比对画面变化；再次点击会关闭自动截屏。
-- 点击 Start Recording 时会询问是否为本次录音开启 Auto Screenshot；点击 Stop Recording 时 Auto Screenshot 也会自动停止。
-- About 窗口说明本软件为开源软件，遵循自由使用原则，并提供 English / 中文 界面切换。
+- 点击 Auto Screenshot: Off 会开启自动截屏，菜单文字变为 Auto Screenshot: On；开启后会立即截屏一次，之后每 30 秒截屏一次，不再缩小图片或比对画面变化；再次点击会关闭自动截屏。
+- 点击 Stop Recording 时 Auto Screenshot 也会自动停止。
+- About 窗口说明本软件为开源软件，遵循自由使用原则，显示当前版本号，并提供 English / 中文 界面切换。
 
 注意：因为录音期间 MP3 只保存在内存中，如果程序崩溃、被强制结束或电脑断电，尚未保存的录音会丢失。
 
@@ -69,8 +71,9 @@ dist\LocalMeetingRecorder.exe
 ```powershell
 python -m pip install -U "huggingface_hub[cli]"
 hf download Systran/faster-distil-whisper-small.en --local-dir .\models\faster-distil-whisper-small.en
+hf download Systran/faster-whisper-small --local-dir .\models\faster-whisper-small
 ```
 
-如果 `models\faster-distil-whisper-small.en` 存在，程序会优先使用这个本地模型目录；否则使用模型名 `distil-small.en`。
+如果 `models\faster-distil-whisper-small.en` 存在，English 会优先使用这个本地模型目录；否则使用模型名 `distil-small.en`。
 
-注意：`distil-small.en` 是英文语音识别模型。如果需要中文或中英混合转写，可以把 `main.py` 中的 `WHISPER_MODEL` 改为 `small`，并把 `WHISPER_LANGUAGE` 改为 `"zh"` 或 `None`。
+如果 `models\faster-whisper-small` 存在，中文会优先使用这个本地模型目录；否则使用模型名 `small`。

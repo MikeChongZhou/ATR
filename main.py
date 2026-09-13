@@ -27,6 +27,7 @@ from transcriber_worker import run_transcriber_process
 
 
 APP_NAME = "Local Meeting Recorder"
+APP_VERSION = "1.0.6"
 RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -35,20 +36,50 @@ CAPTURE_READ_SECONDS = 0.05
 CAPTURE_BLOCK_SECONDS = 0.2
 TRANSCRIBE_SECONDS = 3
 REALTIME_MIN_AUDIO_SECONDS = 1.5
+REALTIME_BEAM_SIZE = 3
 REVIEW_SECONDS = 15
 REVIEW_MIN_AUDIO_SECONDS = 3
 MINUTES_UPDATE_SECONDS = 5
 AUTO_SCREENSHOT_INTERVAL_SECONDS = 30
-WHISPER_MODEL = "distil-small.en"
-LOCAL_MODEL_DIR = Path(__file__).with_name("models") / "faster-distil-whisper-small.en"
-FALLBACK_WHISPER_MODEL = "small"
-FALLBACK_MODEL_DIR = Path(__file__).with_name("models") / "faster-whisper-small"
-WHISPER_LANGUAGE: Optional[str] = "en"
+ENGLISH_WHISPER_MODEL = "distil-small.en"
+ENGLISH_MODEL_DIR = Path(__file__).with_name("models") / "faster-distil-whisper-small.en"
+CHINESE_WHISPER_MODEL = "small"
+CHINESE_MODEL_DIR = Path(__file__).with_name("models") / "faster-whisper-small"
+DEFAULT_TRANSCRIPTION_LANGUAGE = "en"
+TRANSCRIPTION_MODEL_CONFIGS = {
+    "en": {
+        "model_name": ENGLISH_WHISPER_MODEL,
+        "model_dir": ENGLISH_MODEL_DIR,
+        "language": "en",
+        "transcribe_seconds": 5,
+        "beam_size": 5,
+        "condition_on_previous_text": True,
+        "initial_prompt": None,
+        "simplify_chinese": False,
+    },
+    "zh": {
+        "model_name": CHINESE_WHISPER_MODEL,
+        "model_dir": CHINESE_MODEL_DIR,
+        "language": "zh",
+        "transcribe_seconds": 10,
+        "beam_size": 5,
+        "condition_on_previous_text": True,
+        "initial_prompt": (
+            "以下是简体中文会议转录。请使用简体中文输出，并尽量添加正确的中文标点。"
+            "常见词包括：会议、讨论、方案、问题、行动项、负责人、时间节点、"
+        ),
+        "simplify_chinese": True,
+    },
+}
+WHISPER_MODEL = ENGLISH_WHISPER_MODEL
+LOCAL_MODEL_DIR = ENGLISH_MODEL_DIR
+FALLBACK_WHISPER_MODEL = CHINESE_WHISPER_MODEL
+FALLBACK_MODEL_DIR = CHINESE_MODEL_DIR
+WHISPER_LANGUAGE: Optional[str] = DEFAULT_TRANSCRIPTION_LANGUAGE
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
 WHISPER_CPU_THREADS = 2
 WHISPER_NUM_WORKERS = 1
-REALTIME_BEAM_SIZE = 3
 FINAL_BEAM_SIZE = 5
 VAD_PARAMETERS = {"min_silence_duration_ms": 500}
 MIN_TRANSCRIBE_RMS = 0.0015
@@ -81,8 +112,8 @@ TRANSLATIONS = {
         "text_window": "Text Window",
         "stop": "Stop Recording",
         "screenshot": "Take a screenshot",
-        "auto_screenshot_on": "Auto Screenshot On",
-        "auto_screenshot_off": "Auto Screenshot Off",
+        "auto_screenshot_on": "Auto Screenshot: On",
+        "auto_screenshot_off": "Auto Screenshot: Off",
         "about": "About",
         "exit": "Exit",
         "transcript_title": "Live Transcript",
@@ -90,6 +121,13 @@ TRANSLATIONS = {
         "stopping_wait": "Recording is stopping and the transcript is being finished. Please wait.",
         "already_recording": "Recording is already in progress. Click Stop Recording to stop.",
         "ask_auto_screenshot": "Do you want to turn on Auto Screenshot for this recording?",
+        "recording_options_title": "Start Recording",
+        "transcription_language": "Transcription language",
+        "transcription_language_english": "English",
+        "transcription_language_chinese": "Chinese",
+        "auto_screenshot_option": "Auto Screenshot",
+        "start": "Start",
+        "cancel": "Cancel",
         "screenshot_saved": "Screenshot saved:",
         "screenshot_failed": "Screenshot failed:",
         "missing_deps_title": "Missing recording dependencies. Recording cannot start.",
@@ -111,6 +149,7 @@ TRANSLATIONS = {
         "saved": "Saved:",
         "about_title": "About",
         "about_body": "This software is open source and follows the principle of free use.",
+        "about_version": "Version: {version}",
         "language": "Language",
         "transcription_missing": "faster-whisper is not installed. Recording will be saved, but the text file will be empty.\n\nInstall the dependencies in requirements.txt to enable local live transcription.",
         "transcription_unavailable": "Live transcription is currently unavailable. Recording will continue to be saved.",
@@ -133,8 +172,8 @@ TRANSLATIONS = {
         "text_window": "文本窗口",
         "stop": "停止录音",
         "screenshot": "截屏",
-        "auto_screenshot_on": "Auto Screenshot On",
-        "auto_screenshot_off": "Auto Screenshot Off",
+        "auto_screenshot_on": "Auto Screenshot: On",
+        "auto_screenshot_off": "Auto Screenshot: Off",
         "about": "关于",
         "exit": "退出",
         "transcript_title": "实时转录文本",
@@ -142,6 +181,13 @@ TRANSLATIONS = {
         "stopping_wait": "正在停止录音并补全文本转录，请稍候。",
         "already_recording": "正在录音中，请点击“停止录音”结束录音。",
         "ask_auto_screenshot": "是否为本次录音开启 Auto Screenshot？",
+        "recording_options_title": "开始录音",
+        "transcription_language": "转录语言",
+        "transcription_language_english": "英文",
+        "transcription_language_chinese": "中文",
+        "auto_screenshot_option": "自动截屏",
+        "start": "开始",
+        "cancel": "取消",
         "screenshot_saved": "截屏已保存：",
         "screenshot_failed": "截屏失败：",
         "missing_deps_title": "缺少录音依赖，无法开始录音。",
@@ -163,6 +209,7 @@ TRANSLATIONS = {
         "saved": "已保存：",
         "about_title": "关于",
         "about_body": "该软件为开源软件，遵循自由使用原则。",
+        "about_version": "版本号：{version}",
         "language": "语言",
         "transcription_missing": "未安装 faster-whisper，当前只会保存录音，文本文件将为空。\n\n安装 requirements.txt 中的依赖后，可启用本地实时转录。",
         "transcription_unavailable": "实时转录暂时不可用，录音会继续保存。",
@@ -492,12 +539,42 @@ def usable_model_dir(path: Path) -> bool:
     return path.exists() and (path / "config.json").exists() and (path / "model.bin").exists()
 
 
-def whisper_model_path() -> str:
-    if usable_model_dir(LOCAL_MODEL_DIR):
-        return str(LOCAL_MODEL_DIR)
-    if usable_model_dir(FALLBACK_MODEL_DIR):
-        return str(FALLBACK_MODEL_DIR)
-    return WHISPER_MODEL
+def transcription_model_config(language: str) -> dict[str, object]:
+    return TRANSCRIPTION_MODEL_CONFIGS.get(language, TRANSCRIPTION_MODEL_CONFIGS[DEFAULT_TRANSCRIPTION_LANGUAGE])
+
+
+def whisper_model_path(language: str = DEFAULT_TRANSCRIPTION_LANGUAGE) -> str:
+    config = transcription_model_config(language)
+    model_dir = config.get("model_dir")
+    if isinstance(model_dir, Path) and usable_model_dir(model_dir):
+        return str(model_dir)
+    return str(config["model_name"])
+
+
+def whisper_language_code(language: str = DEFAULT_TRANSCRIPTION_LANGUAGE) -> Optional[str]:
+    value = transcription_model_config(language).get("language")
+    return None if value is None else str(value)
+
+
+def realtime_transcribe_seconds(language: str = DEFAULT_TRANSCRIPTION_LANGUAGE) -> float:
+    return float(transcription_model_config(language).get("transcribe_seconds", TRANSCRIBE_SECONDS))
+
+
+def realtime_beam_size(language: str = DEFAULT_TRANSCRIPTION_LANGUAGE) -> int:
+    return int(transcription_model_config(language).get("beam_size", REALTIME_BEAM_SIZE))
+
+
+def condition_on_previous_text(language: str = DEFAULT_TRANSCRIPTION_LANGUAGE) -> bool:
+    return bool(transcription_model_config(language).get("condition_on_previous_text", False))
+
+
+def transcription_initial_prompt(language: str = DEFAULT_TRANSCRIPTION_LANGUAGE) -> Optional[str]:
+    value = transcription_model_config(language).get("initial_prompt")
+    return str(value) if value else None
+
+
+def simplify_chinese_text(language: str = DEFAULT_TRANSCRIPTION_LANGUAGE) -> bool:
+    return bool(transcription_model_config(language).get("simplify_chinese", False))
 
 
 @dataclass
@@ -534,6 +611,7 @@ class TranscriptEntry:
 @dataclass
 class RecordingSession:
     file_stem: str
+    transcription_language: str = DEFAULT_TRANSCRIPTION_LANGUAGE
     stop_event: threading.Event = field(default_factory=threading.Event)
     active_event: threading.Event = field(default_factory=threading.Event)
     audio_queue: "queue.Queue[Optional[TranscriptJob]]" = field(default_factory=queue.Queue)
@@ -635,9 +713,13 @@ class MeetingRecorderApp:
         self.state_lock = threading.Lock()
         self.session: Optional[RecordingSession] = None
         self.transcript_window: Optional[TranscriptWindow] = None
+        self.recording_options_window: Optional[tk.Toplevel] = None
+        self.recording_options_language_var: Optional[tk.StringVar] = None
+        self.recording_options_auto_screenshot_var: Optional[tk.BooleanVar] = None
         self.about_window: Optional[tk.Toplevel] = None
         self.about_language_var: Optional[tk.StringVar] = None
         self.about_body_label: Optional[ttk.Label] = None
+        self.about_version_label: Optional[ttk.Label] = None
         self.about_language_label: Optional[ttk.Label] = None
         self.about_english_check: Optional[ttk.Checkbutton] = None
         self.about_chinese_check: Optional[ttk.Checkbutton] = None
@@ -650,6 +732,7 @@ class MeetingRecorderApp:
         self.transcript_lock = threading.Lock()
         self.transcription_warning_shown = False
         self.whisper_model = None
+        self.whisper_model_language: Optional[str] = None
         self.whisper_model_lock = threading.Lock()
         self.auto_screenshot_enabled = False
         self.screenshot_dir: Optional[Path] = None
@@ -939,6 +1022,12 @@ class MeetingRecorderApp:
                 self.transcript_window.window.destroy()
         self.transcript_window = None
         with contextlib.suppress(Exception):
+            if self.recording_options_window is not None:
+                self.recording_options_window.destroy()
+        self.recording_options_window = None
+        self.recording_options_language_var = None
+        self.recording_options_auto_screenshot_var = None
+        with contextlib.suppress(Exception):
             if self.about_window is not None:
                 self.about_window.destroy()
         self.about_window = None
@@ -953,6 +1042,8 @@ class MeetingRecorderApp:
         self.about_window.title(self.t("about_title"))
         if self.about_body_label is not None:
             self.about_body_label.configure(text=self.t("about_body"))
+        if self.about_version_label is not None:
+            self.about_version_label.configure(text=self.t("about_version", version=APP_VERSION))
         if self.about_language_label is not None:
             self.about_language_label.configure(text=self.t("language"))
         if self.about_english_check is not None:
@@ -961,6 +1052,84 @@ class MeetingRecorderApp:
             self.about_chinese_check.configure(text="中文")
         if self.about_language_var is not None:
             self.about_language_var.set(self.language)
+
+    def show_recording_options_window(self) -> None:
+        if self.recording_options_window is not None and self.recording_options_window.winfo_exists():
+            self.recording_options_window.deiconify()
+            self.recording_options_window.lift()
+            self.recording_options_window.focus_force()
+            return
+
+        window = tk.Toplevel(self.root)
+        self.recording_options_window = window
+        window.title(self.t("recording_options_title"))
+        window.geometry("360x220")
+        window.resizable(False, False)
+        window.protocol("WM_DELETE_WINDOW", self.close_recording_options_window)
+
+        frame = ttk.Frame(window, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        self.recording_options_language_var = tk.StringVar(value=DEFAULT_TRANSCRIPTION_LANGUAGE)
+        self.recording_options_auto_screenshot_var = tk.BooleanVar(value=self.auto_screenshot_enabled)
+
+        ttk.Label(frame, text=self.t("transcription_language")).pack(anchor=tk.W)
+        ttk.Radiobutton(
+            frame,
+            text=self.t("transcription_language_english"),
+            variable=self.recording_options_language_var,
+            value="en",
+        ).pack(anchor=tk.W, pady=(6, 0))
+        ttk.Radiobutton(
+            frame,
+            text=self.t("transcription_language_chinese"),
+            variable=self.recording_options_language_var,
+            value="zh",
+        ).pack(anchor=tk.W, pady=(4, 0))
+        ttk.Checkbutton(
+            frame,
+            text=self.t("auto_screenshot_option"),
+            variable=self.recording_options_auto_screenshot_var,
+        ).pack(anchor=tk.W, pady=(14, 0))
+
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(anchor=tk.E, fill=tk.X, pady=(18, 0))
+        ttk.Button(button_frame, text=self.t("cancel"), command=self.close_recording_options_window).pack(
+            side=tk.RIGHT
+        )
+        ttk.Button(button_frame, text=self.t("start"), command=self.accept_recording_options).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
+
+        window.bind("<Return>", lambda _event: self.accept_recording_options())
+        window.bind("<Escape>", lambda _event: self.close_recording_options_window())
+        window.update_idletasks()
+        x = max(0, (window.winfo_screenwidth() - window.winfo_width()) // 2)
+        y = max(0, (window.winfo_screenheight() - window.winfo_height()) // 2)
+        window.geometry(f"360x220+{x}+{y}")
+        with contextlib.suppress(Exception):
+            window.attributes("-topmost", True)
+        with contextlib.suppress(Exception):
+            window.lift()
+            window.focus_force()
+
+    def close_recording_options_window(self) -> None:
+        if self.recording_options_window is not None:
+            with contextlib.suppress(Exception):
+                self.recording_options_window.destroy()
+        self.recording_options_window = None
+        self.recording_options_language_var = None
+        self.recording_options_auto_screenshot_var = None
+
+    def accept_recording_options(self) -> None:
+        language_var = self.recording_options_language_var
+        auto_screenshot_var = self.recording_options_auto_screenshot_var
+        language = language_var.get() if language_var is not None else DEFAULT_TRANSCRIPTION_LANGUAGE
+        if language not in TRANSCRIPTION_MODEL_CONFIGS:
+            language = DEFAULT_TRANSCRIPTION_LANGUAGE
+        auto_screenshot = bool(auto_screenshot_var.get()) if auto_screenshot_var is not None else False
+        self.close_recording_options_window()
+        self.begin_recording(language, auto_screenshot)
 
     def toggle_recording(self) -> None:
         with self.state_lock:
@@ -987,18 +1156,28 @@ class MeetingRecorderApp:
             return
 
         if AUDIO_ONLY_DIAGNOSTIC:
-            auto_screenshot_requested = False
-        else:
-            auto_screenshot_requested = messagebox.askyesno(
-                self.title(),
-                self.t("ask_auto_screenshot"),
-            )
+            self.begin_recording(DEFAULT_TRANSCRIPTION_LANGUAGE, False)
+            return
+
+        self.show_recording_options_window()
+
+    def begin_recording(self, transcription_language: str, auto_screenshot_requested: bool) -> None:
+        with self.state_lock:
+            state = self.state
+        if state == "recording":
+            messagebox.showinfo(self.title(), self.t("already_recording"))
+            return
+        if state == "stopping":
+            messagebox.showinfo(self.title(), self.t("stopping_wait"))
+            return
+        if transcription_language not in TRANSCRIPTION_MODEL_CONFIGS:
+            transcription_language = DEFAULT_TRANSCRIPTION_LANGUAGE
 
         file_stem = recording_file_stem()
         self.begin_screenshot_session(file_stem)
         self.set_auto_screenshot_enabled(auto_screenshot_requested)
 
-        session = RecordingSession(file_stem=file_stem)
+        session = RecordingSession(file_stem=file_stem, transcription_language=transcription_language)
         session.active_event.set()
 
         self.clear_transcript()
@@ -1181,7 +1360,7 @@ class MeetingRecorderApp:
         review_buffers: dict[str, list[np.ndarray]] = {source: [] for source in AUDIO_SOURCES}
         review_buffered_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
         review_start_frames: dict[str, int] = {source: 0 for source in AUDIO_SOURCES}
-        transcribe_frames = int(TRANSCRIBE_SAMPLE_RATE * TRANSCRIBE_SECONDS)
+        transcribe_frames = int(TRANSCRIBE_SAMPLE_RATE * realtime_transcribe_seconds(session.transcription_language))
         review_frames = int(TRANSCRIBE_SAMPLE_RATE * REVIEW_SECONDS)
         review_min_frames = int(TRANSCRIBE_SAMPLE_RATE * REVIEW_MIN_AUDIO_SECONDS)
         min_frames = int(TRANSCRIBE_SAMPLE_RATE * REALTIME_MIN_AUDIO_SECONDS)
@@ -1443,12 +1622,15 @@ class MeetingRecorderApp:
             session.transcriber_input_queue = context.Queue(maxsize=TRANSCRIBER_INPUT_QUEUE_MAXSIZE)
             session.transcriber_output_queue = context.Queue(maxsize=TRANSCRIBER_OUTPUT_QUEUE_MAXSIZE)
             config = {
-                "model_path": whisper_model_path(),
+                "model_path": whisper_model_path(session.transcription_language),
                 "device": WHISPER_DEVICE,
                 "compute_type": WHISPER_COMPUTE_TYPE,
                 "cpu_threads": WHISPER_CPU_THREADS,
                 "num_workers": WHISPER_NUM_WORKERS,
-                "language": WHISPER_LANGUAGE,
+                "language": whisper_language_code(session.transcription_language),
+                "condition_on_previous_text": condition_on_previous_text(session.transcription_language),
+                "initial_prompt": transcription_initial_prompt(session.transcription_language),
+                "simplify_chinese": simplify_chinese_text(session.transcription_language),
                 "vad_parameters": VAD_PARAMETERS,
             }
             session.transcriber_process = context.Process(
@@ -1566,18 +1748,22 @@ class MeetingRecorderApp:
                 if text and not session.stop_event.is_set():
                     self.append_transcript(session, source_name, text)
 
-    def get_whisper_model(self) -> object:
+    def get_whisper_model(self, transcription_language: str) -> object:
+        language = transcription_language
+        if language not in TRANSCRIPTION_MODEL_CONFIGS:
+            language = DEFAULT_TRANSCRIPTION_LANGUAGE
         with self.whisper_model_lock:
-            if self.whisper_model is None:
+            if self.whisper_model is None or self.whisper_model_language != language:
                 from faster_whisper import WhisperModel
 
                 self.whisper_model = WhisperModel(
-                    whisper_model_path(),
+                    whisper_model_path(language),
                     device=WHISPER_DEVICE,
                     compute_type=WHISPER_COMPUTE_TYPE,
                     cpu_threads=WHISPER_CPU_THREADS,
                     num_workers=WHISPER_NUM_WORKERS,
                 )
+                self.whisper_model_language = language
             return self.whisper_model
 
     def transcription_worker(self, session: RecordingSession) -> None:
@@ -1607,7 +1793,7 @@ class MeetingRecorderApp:
                     {
                         "source_name": job.source_name,
                         "audio": audio,
-                        "beam_size": REALTIME_BEAM_SIZE,
+                        "beam_size": realtime_beam_size(session.transcription_language),
                     },
                 )
         finally:
@@ -1616,7 +1802,7 @@ class MeetingRecorderApp:
     def review_transcription_worker(self, session: RecordingSession) -> None:
         lower_current_thread_priority()
         try:
-            model = self.get_whisper_model()
+            model = self.get_whisper_model(session.transcription_language)
         except ImportError:
             self.root.after(0, self.show_transcription_dependency_warning)
             self.drain_audio_queue(session.review_queue)
@@ -1639,7 +1825,7 @@ class MeetingRecorderApp:
                 segments, _info = model.transcribe(
                     audio,
                     beam_size=FINAL_BEAM_SIZE,
-                    language=WHISPER_LANGUAGE,
+                    language=whisper_language_code(session.transcription_language),
                     vad_filter=True,
                     vad_parameters=VAD_PARAMETERS,
                     condition_on_previous_text=True,
@@ -2042,6 +2228,9 @@ class MeetingRecorderApp:
         self.about_body_label = ttk.Label(frame, wraplength=330, justify=tk.LEFT)
         self.about_body_label.pack(anchor=tk.W, fill=tk.X)
 
+        self.about_version_label = ttk.Label(frame)
+        self.about_version_label.pack(anchor=tk.W, pady=(8, 0))
+
         self.about_language_label = ttk.Label(frame)
         self.about_language_label.pack(anchor=tk.W, pady=(18, 6))
 
@@ -2071,6 +2260,7 @@ class MeetingRecorderApp:
         self.about_window = None
         self.about_language_var = None
         self.about_body_label = None
+        self.about_version_label = None
         self.about_language_label = None
         self.about_english_check = None
         self.about_chinese_check = None
