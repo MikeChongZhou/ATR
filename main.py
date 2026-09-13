@@ -33,17 +33,12 @@ CHANNELS = 1
 CHUNK_SECONDS = 0.5
 CAPTURE_READ_SECONDS = 0.05
 CAPTURE_BLOCK_SECONDS = 0.2
-TRANSCRIBE_SECONDS = 2
+TRANSCRIBE_SECONDS = 3
 REALTIME_MIN_AUDIO_SECONDS = 1.5
 REVIEW_SECONDS = 15
 REVIEW_MIN_AUDIO_SECONDS = 3
 MINUTES_UPDATE_SECONDS = 5
-AUTO_SCREENSHOT_SCAN_SECONDS = 0.5
-AUTO_SCREENSHOT_STABLE_SECONDS = 0.6
-AUTO_SCREENSHOT_COOLDOWN_SECONDS = 2.0
-AUTO_SCREENSHOT_CHANGE_THRESHOLD = 0.08
-AUTO_SCREENSHOT_STABLE_THRESHOLD = 0.02
-SCREENSHOT_PREVIEW_SIZE = (180, 100)
+AUTO_SCREENSHOT_INTERVAL_SECONDS = 30
 WHISPER_MODEL = "distil-small.en"
 LOCAL_MODEL_DIR = Path(__file__).with_name("models") / "faster-distil-whisper-small.en"
 FALLBACK_WHISPER_MODEL = "small"
@@ -51,9 +46,9 @@ FALLBACK_MODEL_DIR = Path(__file__).with_name("models") / "faster-whisper-small"
 WHISPER_LANGUAGE: Optional[str] = "en"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
-WHISPER_CPU_THREADS = 1
+WHISPER_CPU_THREADS = 2
 WHISPER_NUM_WORKERS = 1
-REALTIME_BEAM_SIZE = 1
+REALTIME_BEAM_SIZE = 3
 FINAL_BEAM_SIZE = 5
 VAD_PARAMETERS = {"min_silence_duration_ms": 500}
 MIN_TRANSCRIBE_RMS = 0.0015
@@ -302,17 +297,6 @@ def audio_rms(audio: np.ndarray) -> float:
     if audio.size == 0:
         return 0.0
     return float(np.sqrt(np.mean(audio * audio)))
-
-
-def screenshot_signature(image: Image.Image) -> np.ndarray:
-    preview = image.resize(SCREENSHOT_PREVIEW_SIZE).convert("L")
-    return np.asarray(preview, dtype=np.int16)
-
-
-def screenshot_change_score(before: np.ndarray, after: np.ndarray) -> float:
-    if before.shape != after.shape:
-        return 1.0
-    return float(np.mean(np.abs(after - before)) / 255.0)
 
 
 def split_sentences(text: str) -> list[str]:
@@ -739,36 +723,11 @@ class MeetingRecorderApp:
             self.screenshot_thread = None
 
     def auto_screenshot_worker(self) -> None:
-        last_signature: Optional[np.ndarray] = None
-        last_saved_at = 0.0
+        lower_current_thread_priority()
         try:
             while not self.screenshot_stop_event.is_set():
-                image = self.capture_screen_image()
-                signature = screenshot_signature(image)
-
-                if last_signature is not None:
-                    change_score = screenshot_change_score(last_signature, signature)
-                    now = time.monotonic()
-                    if (
-                        change_score >= AUTO_SCREENSHOT_CHANGE_THRESHOLD
-                        and now - last_saved_at >= AUTO_SCREENSHOT_COOLDOWN_SECONDS
-                    ):
-                        if self.screenshot_stop_event.wait(AUTO_SCREENSHOT_STABLE_SECONDS):
-                            break
-                        stable_image = self.capture_screen_image()
-                        stable_signature = screenshot_signature(stable_image)
-                        stable_score = screenshot_change_score(signature, stable_signature)
-                        if stable_score <= AUTO_SCREENSHOT_STABLE_THRESHOLD:
-                            self.save_screenshot(stable_image, notify=False)
-                            last_saved_at = time.monotonic()
-                            last_signature = stable_signature
-                            if self.screenshot_stop_event.wait(AUTO_SCREENSHOT_SCAN_SECONDS):
-                                break
-                            continue
-                        signature = stable_signature
-
-                last_signature = signature
-                if self.screenshot_stop_event.wait(AUTO_SCREENSHOT_SCAN_SECONDS):
+                self.save_screenshot(notify=False)
+                if self.screenshot_stop_event.wait(AUTO_SCREENSHOT_INTERVAL_SECONDS):
                     break
         except Exception as exc:
             self.auto_screenshot_enabled = False

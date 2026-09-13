@@ -22,11 +22,11 @@
 - MP3 和文本文件默认使用开始录音时的年月日时作为文件名，例如 `20260509_14.mp3` 和 `20260509_14.txt`。
 - 点击 Text Window 会打开实时转写窗口；没有录音时窗口内容为空。
 - 文本窗口底部提供复制按钮，可以把窗口里的文本复制到剪贴板。
-- 实时转写使用 `faster-whisper`，默认模型为英文蒸馏模型 `distil-small.en`；实时文本默认每 2 秒处理一次，后台复核转写当前暂时关闭。
+- 实时转写使用 `faster-whisper`，默认模型为英文蒸馏模型 `distil-small.en`；实时文本默认每 3 秒处理一次，实时 `beam_size` 为 3，后台复核转写当前暂时关闭。
 - 当前只录扬声器，因此实时转录的发言人标签显示为 `Others`。
 - 会议纪要会根据实时转写文本生成主要讨论和 action items。
 - 手动 Screenshot 会在程序或 exe 同级目录下创建 `screen\YYYYMMDD_HH\` 目录，截图文件名为 `YYYYMMDD_HHMMSS.jpg`。
-- 点击 Auto Screenshot Off 会开启自动截屏，菜单文字变为 Auto Screenshot On；再次点击会关闭自动截屏。
+- 点击 Auto Screenshot Off 会开启自动截屏，菜单文字变为 Auto Screenshot On；开启后会立即截屏一次，之后每 30 秒截屏一次，不再缩小图片或比对画面变化；再次点击会关闭自动截屏。
 - 点击 Record 时会询问是否为本次录音开启 Auto Screenshot；点击 Stop Recording 时 Auto Screenshot 也会自动停止。
 - 点击 Record 后，录音菜单不会变成暂停/继续；如需结束录音，请点击 Stop Recording。
 - 未录音时点击 Stop Recording，会提示当前并未录音。
