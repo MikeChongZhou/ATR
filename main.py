@@ -59,19 +59,28 @@ TRANSCRIPTION_SOURCE_QUEUE_MAXSIZE = max(1, int(TRANSCRIPTION_SOURCE_QUEUE_SECON
 TRANSCRIBER_INPUT_QUEUE_MAXSIZE = 2
 TRANSCRIBER_OUTPUT_QUEUE_MAXSIZE = 20
 ENABLE_BACKGROUND_REVIEW = False
-AUDIO_SOURCES = ("source_speaker",)
+RECORD_MICROPHONE = True
+MIX_MICROPHONE_IN_MP3 = True
+MIC_MIN_RMS = 0.002
+MIC_LEAK_ANALYSIS_RATE = 8000
+MIC_LEAK_MAX_LAG_SECONDS = 0.08
+MIC_LEAK_LAG_STEP_SECONDS = 0.002
+MIC_LEAK_CORRELATION_THRESHOLD = 0.82
+AUDIO_SOURCES = ("source_speaker", "source_microphone")
 SPEAKER_LABEL_KEYS = {
     "source_speaker": "speaker_others",
+    "source_microphone": "speaker_me",
 }
 
 
 TRANSLATIONS = {
     "en": {
         "app_name": "Local Meeting Recorder",
-        "record": "Record",
+        "record": "🔴 Start Recording",
+        "record_stop": "◼ Stop Recording",
         "text_window": "Text Window",
         "stop": "Stop Recording",
-        "screenshot": "Screenshot",
+        "screenshot": "Take a screenshot",
         "auto_screenshot_on": "Auto Screenshot On",
         "auto_screenshot_off": "Auto Screenshot Off",
         "about": "About",
@@ -88,10 +97,11 @@ TRANSLATIONS = {
         "details": "Details",
         "not_recording": "No recording is currently in progress.",
         "source_speaker": "speaker",
+        "source_microphone": "microphone",
         "speaker_me": "Me",
         "speaker_others": "Others",
         "source_unavailable": "{source} recording is unavailable. Other available audio sources will continue to be saved.",
-        "all_sources_unavailable": "Speaker recording is unavailable.",
+        "all_sources_unavailable": "No available audio source could be recorded.",
         "save_question": "Do you want to save the MP3 file and text file?",
         "save_dialog_title": "Save recording and transcript",
         "mp3_files": "MP3 files",
@@ -118,7 +128,8 @@ TRANSLATIONS = {
     },
     "zh": {
         "app_name": "本地会议录音",
-        "record": "录音",
+        "record": "🔴 开始录音",
+        "record_stop": "◼ 停止录音",
         "text_window": "文本窗口",
         "stop": "停止录音",
         "screenshot": "截屏",
@@ -138,10 +149,11 @@ TRANSLATIONS = {
         "details": "详细信息",
         "not_recording": "当前并未录音。",
         "source_speaker": "扬声器",
+        "source_microphone": "麦克风",
         "speaker_me": "本人",
         "speaker_others": "其他人",
         "source_unavailable": "{source}录音不可用，将继续保存其他可用声音。",
-        "all_sources_unavailable": "扬声器录音不可用。",
+        "all_sources_unavailable": "没有可用声音源可录制。",
         "save_question": "是否保存 MP3 文件和文本文件？",
         "save_dialog_title": "保存录音和转录文本",
         "mp3_files": "MP3 文件",
@@ -211,8 +223,56 @@ def raise_current_thread_priority() -> None:
             set_thread_priority(thread, thread_priority_above_normal)
 
 
+def is_microphone_in_use_by_other_app() -> bool:
+    if sys.platform != "win32":
+        return False
+
+    try:
+        import comtypes
+        from pycaw.constants import AudioSessionState
+        from pycaw.pycaw import AudioSession, AudioUtilities, IAudioSessionControl2
+    except Exception:
+        return False
+
+    com_initialized = False
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            comtypes.CoInitialize()
+            com_initialized = True
+
+            microphone = AudioUtilities.CreateDevice(AudioUtilities.GetMicrophone())
+            if microphone is None:
+                return False
+
+            with contextlib.suppress(Exception):
+                if microphone.EndpointVolume.GetMute():
+                    return False
+
+            session_enumerator = microphone.AudioSessionManager.GetSessionEnumerator()
+            active_value = getattr(AudioSessionState.Active, "value", AudioSessionState.Active)
+            active_state = int(active_value)
+            current_pid = os.getpid()
+            for index in range(session_enumerator.GetCount()):
+                control = session_enumerator.GetSession(index)
+                if control is None:
+                    continue
+                session = AudioSession(control.QueryInterface(IAudioSessionControl2))
+                process_id = int(session.ProcessId)
+                if int(session.State) == active_state and process_id not in (0, current_pid):
+                    return True
+    except Exception:
+        return False
+    finally:
+        if com_initialized:
+            with contextlib.suppress(Exception):
+                comtypes.CoUninitialize()
+
+    return False
+
+
 def recording_file_stem() -> str:
-    return dt.datetime.now().strftime("%Y%m%d_%H")
+    return dt.datetime.now().strftime("%Y%m%d_%H%M")
 
 
 def app_directory() -> Path:
@@ -222,7 +282,7 @@ def app_directory() -> Path:
 
 
 def screenshot_folder_name() -> str:
-    return dt.datetime.now().strftime("%Y%m%d_%H")
+    return dt.datetime.now().strftime("%Y%m%d_%H%M")
 
 
 def screenshot_file_stem() -> str:
@@ -297,6 +357,78 @@ def audio_rms(audio: np.ndarray) -> float:
     if audio.size == 0:
         return 0.0
     return float(np.sqrt(np.mean(audio * audio)))
+
+
+def normalized_abs_correlation(first: np.ndarray, second: np.ndarray) -> float:
+    if first.size == 0 or second.size == 0:
+        return 0.0
+    size = min(first.size, second.size)
+    first = first[:size] - float(np.mean(first[:size]))
+    second = second[:size] - float(np.mean(second[:size]))
+    denominator = float(np.sqrt(np.sum(first * first) * np.sum(second * second)))
+    if denominator <= 1e-9:
+        return 0.0
+    return abs(float(np.sum(first * second) / denominator))
+
+
+def max_lagged_correlation(reference: np.ndarray, candidate: np.ndarray, sample_rate: int) -> float:
+    max_lag = max(1, int(MIC_LEAK_MAX_LAG_SECONDS * sample_rate))
+    lag_step = max(1, int(MIC_LEAK_LAG_STEP_SECONDS * sample_rate))
+    minimum_size = max(1, int(0.15 * sample_rate))
+    best = 0.0
+
+    for lag in range(-max_lag, max_lag + 1, lag_step):
+        if lag < 0:
+            ref = reference[-lag:]
+            cand = candidate[: candidate.size + lag]
+        elif lag > 0:
+            ref = reference[:-lag]
+            cand = candidate[lag:]
+        else:
+            ref = reference
+            cand = candidate
+
+        size = min(ref.size, cand.size)
+        if size < minimum_size:
+            continue
+        best = max(best, normalized_abs_correlation(ref[:size], cand[:size]))
+
+    return best
+
+
+def is_microphone_bleed_from_speaker(speaker_audio: Optional[np.ndarray], microphone_audio: np.ndarray) -> bool:
+    microphone_audio = normalize_audio(microphone_audio)
+    if microphone_audio.size == 0 or audio_rms(microphone_audio) < MIC_MIN_RMS:
+        return True
+
+    if speaker_audio is None:
+        return False
+
+    speaker_audio = normalize_audio(speaker_audio)
+    if speaker_audio.size == 0 or audio_rms(speaker_audio) < MIN_TRANSCRIBE_RMS:
+        return False
+
+    speaker = resample_audio(speaker_audio, RECORD_SAMPLE_RATE, MIC_LEAK_ANALYSIS_RATE)
+    microphone = resample_audio(microphone_audio, RECORD_SAMPLE_RATE, MIC_LEAK_ANALYSIS_RATE)
+    size = min(speaker.size, microphone.size)
+    if size <= 0:
+        return False
+
+    correlation = max_lagged_correlation(speaker[:size], microphone[:size], MIC_LEAK_ANALYSIS_RATE)
+    return correlation >= MIC_LEAK_CORRELATION_THRESHOLD
+
+
+def filter_microphone_bleed(chunks: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    microphone_audio = chunks.get("source_microphone")
+    if microphone_audio is None:
+        return chunks
+
+    if is_microphone_bleed_from_speaker(chunks.get("source_speaker"), microphone_audio):
+        filtered = dict(chunks)
+        filtered.pop("source_microphone", None)
+        return filtered
+
+    return chunks
 
 
 def split_sentences(text: str) -> list[str]:
@@ -564,6 +696,10 @@ class MeetingRecorderApp:
 
     @property
     def record_menu_text(self) -> str:
+        with self.state_lock:
+            state = self.state
+        if state in {"recording", "stopping"}:
+            return self.t("record_stop")
         return self.t("record")
 
     @property
@@ -574,9 +710,8 @@ class MeetingRecorderApp:
 
     def build_menu(self) -> Menu:
         return Menu(
-            MenuItem(lambda item: self.record_menu_text, self.tray_record_clicked, default=True),
+            MenuItem(lambda item: self.record_menu_text, self.tray_record_clicked),
             MenuItem(lambda item: self.t("text_window"), self.tray_text_window_clicked),
-            MenuItem(lambda item: self.t("stop"), self.tray_stop_clicked),
             MenuItem(lambda item: self.t("screenshot"), self.tray_screenshot_clicked),
             MenuItem(lambda item: self.auto_screenshot_menu_text, self.tray_auto_screenshot_clicked),
             MenuItem(lambda item: self.t("about"), self.tray_about_clicked),
@@ -597,9 +732,6 @@ class MeetingRecorderApp:
 
     def tray_text_window_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
         self.root.after(0, self.open_transcript_window)
-
-    def tray_stop_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.stop_recording)
 
     def tray_screenshot_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
         self.root.after(0, self.take_manual_screenshot)
@@ -638,9 +770,23 @@ class MeetingRecorderApp:
     def screenshot_root(self) -> Path:
         return app_directory() / "screen"
 
-    def ensure_screenshot_dir(self) -> Path:
-        directory = self.screenshot_root() / screenshot_folder_name()
+    def begin_screenshot_session(self, folder_name: Optional[str] = None) -> Path:
+        directory = self.screenshot_root() / (folder_name or screenshot_folder_name())
         with self.screenshot_lock:
+            directory.mkdir(parents=True, exist_ok=True)
+            self.screenshot_dir = directory
+        return directory
+
+    def reset_screenshot_session(self) -> None:
+        with self.screenshot_lock:
+            self.screenshot_dir = None
+
+    def ensure_screenshot_dir(self) -> Path:
+        with self.screenshot_lock:
+            if self.screenshot_dir is not None:
+                self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+                return self.screenshot_dir
+            directory = self.screenshot_root() / screenshot_folder_name()
             directory.mkdir(parents=True, exist_ok=True)
             self.screenshot_dir = directory
         return directory
@@ -687,7 +833,7 @@ class MeetingRecorderApp:
             return None
 
     def take_manual_screenshot(self) -> None:
-        self.save_screenshot(notify=True)
+        self.save_screenshot(notify=False)
 
     def toggle_auto_screenshot(self) -> None:
         self.set_auto_screenshot_enabled(not self.auto_screenshot_enabled)
@@ -787,6 +933,7 @@ class MeetingRecorderApp:
     def finalize_exit(self) -> None:
         self.session = None
         self.clear_transcript()
+        self.reset_screenshot_session()
         with contextlib.suppress(Exception):
             if self.transcript_window is not None:
                 self.transcript_window.window.destroy()
@@ -822,7 +969,7 @@ class MeetingRecorderApp:
         if state == "idle":
             self.start_recording()
         elif state == "recording":
-            messagebox.showinfo(self.title(), self.t("already_recording"))
+            self.stop_recording()
         elif state == "stopping":
             messagebox.showinfo(self.title(), self.t("stopping_wait"))
 
@@ -840,15 +987,17 @@ class MeetingRecorderApp:
             return
 
         if AUDIO_ONLY_DIAGNOSTIC:
-            self.set_auto_screenshot_enabled(False)
+            auto_screenshot_requested = False
         else:
             auto_screenshot_requested = messagebox.askyesno(
                 self.title(),
                 self.t("ask_auto_screenshot"),
             )
-            self.set_auto_screenshot_enabled(auto_screenshot_requested)
 
         file_stem = recording_file_stem()
+        self.begin_screenshot_session(file_stem)
+        self.set_auto_screenshot_enabled(auto_screenshot_requested)
+
         session = RecordingSession(file_stem=file_stem)
         session.active_event.set()
 
@@ -949,14 +1098,20 @@ class MeetingRecorderApp:
 
             speaker = sc.default_speaker()
             loopback = sc.get_microphone(speaker.name, include_loopback=True)
+            capture_sources: list[tuple[str, object]] = [("source_speaker", loopback)]
+            if RECORD_MICROPHONE and is_microphone_in_use_by_other_app():
+                with contextlib.suppress(Exception):
+                    capture_sources.append(("source_microphone", sc.default_microphone()))
 
             chunk_frames = max(1, int(RECORD_SAMPLE_RATE * CHUNK_SECONDS))
 
-            source_queues: dict[str, "queue.Queue[Optional[np.ndarray]]"] = {source: queue.Queue() for source in AUDIO_SOURCES}
+            source_queues: dict[str, "queue.Queue[Optional[np.ndarray]]"] = {
+                source_name: queue.Queue() for source_name, _source in capture_sources
+            }
             source_done = {name: False for name in source_queues}
             source_errors: "queue.Queue[tuple[str, Exception]]" = queue.Queue()
 
-            for source_name, source in (("source_speaker", loopback),):
+            for source_name, source in capture_sources:
                 thread = threading.Thread(
                     target=self.audio_capture_worker,
                     args=(session, source_name, source, source_queues[source_name], source_errors),
@@ -979,14 +1134,17 @@ class MeetingRecorderApp:
                         break
                     continue
 
-                audio = mix_audio_sources(list(chunks.values()))
-                if audio.size == 0:
+                chunks = filter_microphone_bleed(chunks)
+                if not chunks:
                     continue
 
-                frame_set = AudioFrameSet(chunks)
-                session.mp3_queue.put(frame_set)
+                mp3_chunks = chunks
+                if not MIX_MICROPHONE_IN_MP3:
+                    mp3_chunks = {name: audio for name, audio in chunks.items() if name != "source_microphone"}
+                if mp3_chunks:
+                    session.mp3_queue.put(AudioFrameSet(mp3_chunks))
                 if not AUDIO_ONLY_DIAGNOSTIC:
-                    self.offer_transcription_source_frame(session, frame_set)
+                    self.offer_transcription_source_frame(session, AudioFrameSet(chunks))
 
             if all(source_done.values()) and not session.stop_event.is_set():
                 raise RuntimeError(self.t("all_sources_unavailable"))
@@ -1756,6 +1914,7 @@ class MeetingRecorderApp:
             session.cleanup()
             self.session = None
             self.clear_transcript()
+            self.reset_screenshot_session()
             return
 
         should_save = messagebox.askyesno(
@@ -1768,6 +1927,7 @@ class MeetingRecorderApp:
         session.cleanup()
         self.session = None
         self.clear_transcript()
+        self.reset_screenshot_session()
         if self.transcript_window is not None:
             self.transcript_window.set_text("")
 

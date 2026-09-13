@@ -4,3 +4,4 @@ soundcard>=0.4.3
 numpy>=1.26.0
 lameenc>=1.7.0
 faster-whisper>=1.0.0
+pycaw>=20220416
