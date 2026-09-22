@@ -13,6 +13,8 @@ if (-not (Test-Path $Python)) {
     --windowed `
     --name LocalMeetingRecorder `
     --hidden-import transcriber_worker `
+    --hidden-import faster_whisper `
+    --hidden-import faster_whisper.audio `
     --hidden-import pycaw `
     --hidden-import pycaw.pycaw `
     --hidden-import pycaw.constants `

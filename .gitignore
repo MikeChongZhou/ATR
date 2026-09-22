@@ -13,6 +13,7 @@ models/
 output/
 screen/
 tools/
+local_meeting_recorder_settings.json
 
 *.mp3
 *.wav

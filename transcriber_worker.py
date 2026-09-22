@@ -80,8 +80,8 @@ def run_transcriber_process(input_queue: Any, output_queue: Any, config: dict[st
                 transcribe_options = {
                     "beam_size": int(job.get("beam_size", 1)),
                     "language": config["language"],
-                    "vad_filter": True,
-                    "vad_parameters": config["vad_parameters"],
+                    "vad_filter": bool(config.get("vad_filter", True)),
+                    "vad_parameters": config.get("vad_parameters", {}),
                     "condition_on_previous_text": bool(config.get("condition_on_previous_text", False)),
                 }
                 if config.get("initial_prompt"):
@@ -98,7 +98,10 @@ def run_transcriber_process(input_queue: Any, output_queue: Any, config: dict[st
                 output_queue.put(
                     {
                         "kind": "realtime",
+                        "job_id": job.get("job_id"),
                         "source_name": job.get("source_name", "source_speaker"),
+                        "start": job.get("start"),
+                        "end": job.get("end"),
                         "text": text,
                     }
                 )
