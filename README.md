@@ -95,7 +95,7 @@ hf download Systran/faster-whisper-small --local-dir .\models\faster-whisper-sma
 
 ## 本地 LLM 会议纪要
 
-最终会议纪要使用本机 OpenAI-compatible API。默认配置为托管 llama.cpp，并使用 `Qwen/Qwen3-0.6B-GGUF:Q8_0`。录音和转写保存完成后，程序会在后台启动或复用 llama server 生成会议纪要，并写回同一个 txt 文件。
+最终会议纪要使用本机 OpenAI-compatible API。默认配置为托管 llama.cpp，并使用 `ggml-org/Qwen3-1.7B-GGUF:Q4_K_M`。录音和转写保存完成后，程序会在后台启动或复用 llama server 生成会议纪要，并写回同一个 txt 文件。
 
 长转写文本会自动分段总结：程序先按 `Chunk chars` 把 transcript 切成多个 chunk，逐段生成 chunk summary，然后再把 chunk summaries 合并成最终会议纪要。`Final merge max chars` 控制最后合并阶段最多送入多少字符，`Max output tokens` 控制每次 LLM 调用的最大输出长度。
 
@@ -106,7 +106,7 @@ hf download Systran/faster-whisper-small --local-dir .\models\faster-whisper-sma
 ```text
 Managed llama server: on
 llama executable: 留空时自动查找 .\llm\llama.exe、.\llm\llama-server.exe 或 PATH 里的 llama
-llama model ref: Qwen/Qwen3-0.6B-GGUF:Q8_0
+llama model ref: ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
 llama context: 4096
 llama slots: 1
 ```
@@ -117,25 +117,25 @@ llama slots: 1
 
 ```powershell
 winget install llama.cpp
-llama serve -hf Qwen/Qwen3-0.6B-GGUF:Q8_0 --host 127.0.0.1 --port 8080 -c 4096 -np 1
+llama serve -hf ggml-org/Qwen3-1.7B-GGUF:Q4_K_M --host 127.0.0.1 --port 8080 -c 4096 -np 1
 ```
 
 对应设置：
 
 ```text
 OpenAI-compatible URL: http://127.0.0.1:8080/v1/chat/completions
-Model: Qwen/Qwen3-0.6B-GGUF:Q8_0
+Model: ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
 ```
 
 如果使用 Ollama：
 
 ```powershell
-ollama run hf.co/Qwen/Qwen3-0.6B-GGUF:Q8_0
+ollama run hf.co/ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
 ```
 
 对应设置：
 
 ```text
 OpenAI-compatible URL: http://127.0.0.1:11434/v1/chat/completions
-Model: hf.co/Qwen/Qwen3-0.6B-GGUF:Q8_0
+Model: hf.co/ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
 ```

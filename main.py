@@ -114,7 +114,6 @@ DEFAULT_LLM_FULL_SUMMARY_PROMPT = (
     "- Use the same language as the transcript. If Chinese is used, write Simplified Chinese.\n"
     "- Be concise but complete.\n"
     "- Do not invent missing details.\n"
-    "- Only list action items that are explicitly assigned, requested, or committed in the transcript.\n"
     "- Never convert questions, discussion topics, compliments, or background facts into action items.\n"
     "- If an action item has no clear owner, write Owner: Unassigned.\n"
     "- If an action item has no explicit due date in the transcript, write Due: Unspecified.\n"
@@ -134,14 +133,25 @@ DEFAULT_LLM_FULL_SUMMARY_PROMPT = (
 
 DEFAULT_LLM_CHUNK_SUMMARY_PROMPT = (
     "Summarize transcript chunk {index} of {total}. This is not the final meeting summary.\n\n"
-    "Extract only durable facts from this chunk:\n"
+    "Extract facts from this chunk:\n"
     "- discussion topics\n"
     "- decisions\n"
-    "- action items only when explicitly assigned, requested, or committed\n"
+    "- action items \n"
     "- open questions\n"
     "- important numbers, customer/account names, and deadlines\n\n"
-    "Do not invent details. Do not turn questions or discussion topics into action items. "
-    "Keep the summary compact but specific.\n\n"
+    "Do not invent details. \n"
+    "Keep the summary compact but specific.\n"
+    "- If an action item has no clear owner, write Owner: Unassigned.\n"
+    "- If an action item has no explicit due date in the transcript, write Due: Unspecified.\n\n"
+    "Output format:\n"
+    "Main discussion:\n"
+    "- ...\n\n"
+    "Decisions:\n"
+    "- ...\n\n"
+    "Action items:\n"
+    "- Owner: ... | Task: ... | Due: ...\n\n"
+    "Open questions:\n"
+    "- ...\n\n"
     "Transcript chunk:\n"
     "{transcript}"
 )
@@ -152,9 +162,7 @@ DEFAULT_LLM_MERGE_SUMMARY_PROMPT = (
     "- Use the same language as the summaries. If Chinese is used, write Simplified Chinese.\n"
     "- Remove duplicates across chunks.\n"
     "- Keep important numbers, customer/account names, decisions, and action owners.\n"
-    "- Do not invent missing owners or due dates.\n\n"
-    "- Only keep action items that were explicitly assigned, requested, or committed.\n"
-    "- If no explicit action item exists, write exactly: - None.\n\n"
+    "- Do not drop any action item from chunk summaries. Preserve every non-duplicate action item.\n\n"
     "Output format:\n"
     "Main discussion:\n"
     "- ...\n\n"
@@ -710,11 +718,11 @@ def default_realtime_settings() -> dict[str, Any]:
         "auto_screenshot_interval_seconds": AUTO_SCREENSHOT_INTERVAL_SECONDS,
         "llm_summary_enabled": True,
         "llm_summary_base_url": "http://127.0.0.1:8080/v1/chat/completions",
-        "llm_summary_model": "Qwen/Qwen3-0.6B-GGUF:Q8_0",
-        "llm_summary_timeout_seconds": 90.0,
+        "llm_summary_model": "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M",
+        "llm_summary_timeout_seconds": 300.0,
         "llm_summary_max_input_chars": 12000,
         "llm_summary_chunk_chars": 6000,
-        "llm_summary_max_output_tokens": 800,
+        "llm_summary_max_output_tokens": 1600,
         "llm_summary_temperature": 0.2,
         "llm_summary_prompt": "",
         "llm_full_summary_prompt": DEFAULT_LLM_FULL_SUMMARY_PROMPT,
@@ -722,7 +730,7 @@ def default_realtime_settings() -> dict[str, Any]:
         "llm_merge_summary_prompt": DEFAULT_LLM_MERGE_SUMMARY_PROMPT,
         "llm_server_managed": True,
         "llm_server_executable": "",
-        "llm_server_model_ref": "Qwen/Qwen3-0.6B-GGUF:Q8_0",
+        "llm_server_model_ref": "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M",
         "llm_server_host": "127.0.0.1",
         "llm_server_port": 8080,
         "llm_server_context": 4096,
@@ -2794,8 +2802,8 @@ class MeetingRecorderApp:
                 merge_dict(offline_settings, data.get("offline_transcript_settings"))
                 if needs_llm_migration:
                     settings["llm_summary_enabled"] = True
-                    settings["llm_summary_model"] = "Qwen/Qwen3-0.6B-GGUF:Q8_0"
-                    settings["llm_server_model_ref"] = "Qwen/Qwen3-0.6B-GGUF:Q8_0"
+                    settings["llm_summary_model"] = "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M"
+                    settings["llm_server_model_ref"] = "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M"
                     settings["llm_server_managed"] = True
                     settings["llm_server_context"] = 4096
                     settings["llm_server_slots"] = 1
