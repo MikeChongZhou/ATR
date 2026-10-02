@@ -28,4 +28,12 @@ if (-not (Test-Path $Python)) {
     --exclude-module sklearn `
     main.py
 
+$DistLlm = "dist\LocalMeetingRecorder\llm"
+if (Test-Path "llm") {
+    if (Test-Path $DistLlm) {
+        Remove-Item $DistLlm -Recurse -Force
+    }
+    Copy-Item "llm" $DistLlm -Recurse
+}
+
 Write-Host "Build complete: dist\LocalMeetingRecorder\LocalMeetingRecorder.exe"

@@ -12,7 +12,10 @@ dist/
 models/
 output/
 screen/
+summary_debug/
 tools/
+llm/
+llm.txt
 local_meeting_recorder_settings.json
 
 *.mp3
@@ -21,4 +24,4 @@ local_meeting_recorder_settings.json
 *.aac
 *.log
 
-main - Copy.py
+main - Copy*.py
