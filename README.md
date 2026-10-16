@@ -24,8 +24,8 @@
 - 录音时底层每 0.05 秒读取一次声卡音频，内部拼成 0.5 秒音频块再送给 MP3 编码和实时转写。
 - 录音采集线程会尽量提高优先级；实时转写、会议纪要和自动截屏线程会降低优先级，减少对录音采集的影响。
 - 录音开始时会在程序或 exe 同级目录的 `output` 目录下创建 `.mp3.partial` 和 `.txt.partial` 文件。
-- 录音期间 MP3 会边录边编码并持续写入 `.mp3.partial`，不再把整段录音长期保存在内存中。
-- 实时转写每次追加新文本后会刷新 `.txt.partial`，降低程序异常退出时丢失文本的风险。
+- 录音期间 MP3 会边录边编码，但按当前语言的 slice 周期批量写入 `.mp3.partial`；例如 slice 为 15 秒时，大约每 15 秒写一次。
+- 实时转写文本也按当前语言的 slice 周期刷新 `.txt.partial`；停止录音和写入会议纪要时会强制写入最新文本。
 - 录音期间不再生成临时 WAV 或 speaker WAV 文件。
 - 点击 ◼ Stop Recording 后会停止录音和转写，把 `.partial` 文件改名为正式 `.mp3` 和 `.txt` 文件，并弹出保存路径通知；不再弹出保存位置选择框。
 - MP3 和文本文件默认使用开始录音时的年月日时分作为文件名，例如 `20260912_1056.mp3` 和 `20260912_1056.txt`。
@@ -37,7 +37,7 @@
 - 勾选 Offline Transcript 的 `Log chunk timing` 后，每个转写片段完成时会在文本窗口和 `local_meeting_recorder.log` 中记录音频时间段、Whisper 耗时、RTF 和实时积压估算，便于判断当前参数是否会越转越慢。
 - 离线转写和实时录音互斥：实时录音中不能启动离线转写；离线转写正在运行时不能开始实时录音。
 - 离线转写复用实时转写的 Whisper 子进程和切片处理方式，便于用离线文件测试实时转写参数。
-- 点击 System Settings 可以调整实时转写参数和自动截屏间隔，包括转写采样率、Whisper device / compute type / CPU threads / workers、VAD、VAD 静音时长、最低 RMS、实时转写输入队列大小、音频采集块、录音读取间隔、录音内部拼块、Auto Screenshot 间隔秒数，以及 English / Chinese 各自的模型、模型目录、语言、切片长度、重叠时长、beam size、`condition_on_previous_text`、基础 prompt 和简繁转换设置。
+- 点击 System Settings 可以调整实时转写参数和自动截屏间隔，包括转写采样率、Whisper device / compute type / CPU threads / workers、VAD、VAD 静音时长、最低 RMS、实时转写输入队列大小、音频采集块、录音读取间隔、录音内部拼块、Auto Screenshot 间隔秒数，以及 English / Chinese 各自的模型预设、模型名、模型目录、语言、切片长度、重叠时长、beam size、`condition_on_previous_text`、基础 prompt 和简繁转换设置。选择模型预设时，如果本地模型目录不存在，可以直接下载并显示进度。
 - 点击 Start Recording 后会先选择本次转录语言、是否开启 Auto Screenshot，并可以输入本次辅助识别 prompt；该 prompt 会按语言保存，下次开始实时转录时自动带出，用户可以修改或继续沿用。
 - 实时转写使用 `faster-whisper`：English 使用英文蒸馏模型 `distil-small.en`，每 5 秒处理一次，实时 `beam_size` 为 5，`condition_on_previous_text=True`；中文使用多语言模型 `small` 并固定 `language="zh"`，每 10 秒处理一次，实时 `beam_size` 为 5，`condition_on_previous_text=True`，并加入简体中文和中文标点提示词；后台复核转写当前暂时关闭。
 - 中文模式会在转写结果返回后尝试使用 OpenCC 做繁体转简体；如果尚未安装 `opencc-python-reimplemented`，程序仍可运行，但不会强制繁转简。
@@ -79,7 +79,7 @@ dist\LocalMeetingRecorder.exe
 
 ## Whisper 模型
 
-第一次运行实时转写时，模型可能需要下载，耗时取决于网络和电脑性能。
+第一次运行实时转写时，模型可能需要下载，耗时取决于网络和电脑性能。也可以在 System Settings 的 English / Chinese 页选择 `Model preset`；选择预设后，如果本地模型不存在，程序会下载到程序或 exe 同级目录的 `models` 目录，并显示下载进度。
 
 也可以手动下载模型到项目目录：
 
@@ -89,24 +89,25 @@ hf download Systran/faster-distil-whisper-small.en --local-dir .\models\faster-d
 hf download Systran/faster-whisper-small --local-dir .\models\faster-whisper-small
 ```
 
-如果 `models\faster-distil-whisper-small.en` 存在，English 会优先使用这个本地模型目录；否则使用模型名 `distil-small.en`。
+English 默认预设为 `Systran/faster-distil-whisper-small.en`，本地目录为 `models\faster-distil-whisper-small.en`；也可以选择 English small、medium、base，或手工配置自定义模型名和目录。
 
-如果 `models\faster-whisper-small` 存在，中文会优先使用这个本地模型目录；否则使用模型名 `small`。
+中文默认预设为 `Systran/faster-whisper-small`，本地目录为 `models\faster-whisper-small`；也可以选择 multilingual medium、large-v3、base，或手工配置自定义模型名和目录。
 
 ## 本地 LLM 会议纪要
 
-最终会议纪要使用本机 OpenAI-compatible API。默认配置为托管 llama.cpp，并使用 `ggml-org/Qwen3-1.7B-GGUF:Q4_K_M`。录音和转写保存完成后，程序会在后台启动或复用 llama server 生成会议纪要，并写回同一个 txt 文件。
+最终会议纪要使用本机 OpenAI-compatible API。默认配置为托管 llama.cpp，并使用 `lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M`。录音和转写保存完成后，程序会在后台启动或复用 llama server 生成会议纪要，并写回同一个 txt 文件。
 
 长转写文本会自动分段总结：程序先按 `Chunk chars` 把 transcript 切成多个 chunk，逐段生成 chunk summary，然后再把 chunk summaries 合并成最终会议纪要。`Final merge max chars` 控制最后合并阶段最多送入多少字符，`Max output tokens` 控制每次 LLM 调用的最大输出长度。
 
 如果使用 `-c 4096 -np 1` 启动 llama.cpp，建议把 `Chunk chars` 设置在 `5000-7000` 之间；如果使用 `-c 8192`，可以适当提高到 `9000-12000`。
 
-托管模式会根据 Summary 设置自动启动 llama：
+托管模式会根据 Summary 设置自动启动 llama。Summary 页可以选择 LLM model preset；如果选择的模型本地尚未下载，可以点击 `Download LLM model` 下载到程序或 exe 同级目录的 `models\llm` 目录。下载完成后程序优先用本地 GGUF 文件启动；如果没有本地文件，则用 `llama -hf` 按模型引用启动。
 
 ```text
 Managed llama server: on
 llama executable: 留空时自动查找 .\llm\llama.exe、.\llm\llama-server.exe 或 PATH 里的 llama
-llama model ref: ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
+llama model ref: lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
+llama local model path: 下载完成后自动填写；为空时使用 llama model ref
 llama context: 4096
 llama slots: 1
 ```
@@ -117,25 +118,25 @@ llama slots: 1
 
 ```powershell
 winget install llama.cpp
-llama serve -hf ggml-org/Qwen3-1.7B-GGUF:Q4_K_M --host 127.0.0.1 --port 8080 -c 4096 -np 1
+llama serve -hf lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M --host 127.0.0.1 --port 8080 -c 4096 -np 1
 ```
 
 对应设置：
 
 ```text
 OpenAI-compatible URL: http://127.0.0.1:8080/v1/chat/completions
-Model: ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
+Model: lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
 ```
 
 如果使用 Ollama：
 
 ```powershell
-ollama run hf.co/ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
+ollama run hf.co/lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
 ```
 
 对应设置：
 
 ```text
 OpenAI-compatible URL: http://127.0.0.1:11434/v1/chat/completions
-Model: hf.co/ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
+Model: hf.co/lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
 ```

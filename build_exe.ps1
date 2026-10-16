@@ -15,6 +15,8 @@ if (-not (Test-Path $Python)) {
     --hidden-import transcriber_worker `
     --hidden-import faster_whisper `
     --hidden-import faster_whisper.audio `
+    --hidden-import huggingface_hub `
+    --hidden-import huggingface_hub.hf_api `
     --hidden-import pycaw `
     --hidden-import pycaw.pycaw `
     --hidden-import pycaw.constants `

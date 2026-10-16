@@ -51,6 +51,77 @@ ENGLISH_MODEL_DIR = Path(__file__).with_name("models") / "faster-distil-whisper-
 CHINESE_WHISPER_MODEL = "small"
 CHINESE_MODEL_DIR = Path(__file__).with_name("models") / "faster-whisper-small"
 DEFAULT_TRANSCRIPTION_LANGUAGE = "en"
+CUSTOM_MODEL_PRESET_LABEL = "Custom / manual"
+WHISPER_MODEL_PRESETS: dict[str, list[dict[str, str]]] = {
+    "en": [
+        {
+            "id": "distil-small.en",
+            "label": "English distil small (recommended)",
+            "repo_id": "Systran/faster-distil-whisper-small.en",
+            "model_name": "distil-small.en",
+            "local_dir": "faster-distil-whisper-small.en",
+            "language": "en",
+        },
+        {
+            "id": "small.en",
+            "label": "English small",
+            "repo_id": "Systran/faster-whisper-small.en",
+            "model_name": "small.en",
+            "local_dir": "faster-whisper-small.en",
+            "language": "en",
+        },
+        {
+            "id": "medium.en",
+            "label": "English medium",
+            "repo_id": "Systran/faster-whisper-medium.en",
+            "model_name": "medium.en",
+            "local_dir": "faster-whisper-medium.en",
+            "language": "en",
+        },
+        {
+            "id": "base.en",
+            "label": "English base",
+            "repo_id": "Systran/faster-whisper-base.en",
+            "model_name": "base.en",
+            "local_dir": "faster-whisper-base.en",
+            "language": "en",
+        },
+    ],
+    "zh": [
+        {
+            "id": "small",
+            "label": "Multilingual small (recommended)",
+            "repo_id": "Systran/faster-whisper-small",
+            "model_name": "small",
+            "local_dir": "faster-whisper-small",
+            "language": "zh",
+        },
+        {
+            "id": "medium",
+            "label": "Multilingual medium",
+            "repo_id": "Systran/faster-whisper-medium",
+            "model_name": "medium",
+            "local_dir": "faster-whisper-medium",
+            "language": "zh",
+        },
+        {
+            "id": "large-v3",
+            "label": "Multilingual large-v3",
+            "repo_id": "Systran/faster-whisper-large-v3",
+            "model_name": "large-v3",
+            "local_dir": "faster-whisper-large-v3",
+            "language": "zh",
+        },
+        {
+            "id": "base",
+            "label": "Multilingual base",
+            "repo_id": "Systran/faster-whisper-base",
+            "model_name": "base",
+            "local_dir": "faster-whisper-base",
+            "language": "zh",
+        },
+    ],
+}
 TRANSCRIPTION_MODEL_CONFIGS = {
     "en": {
         "model_name": ENGLISH_WHISPER_MODEL,
@@ -175,6 +246,37 @@ DEFAULT_LLM_MERGE_SUMMARY_PROMPT = (
     "Chunk summaries:\n"
     "{chunk_summaries}"
 )
+
+LLM_MODEL_PRESETS: list[dict[str, str]] = [
+    {
+        "id": "qwen3-1.7b-q4-k-m",
+        "label": "Qwen3 1.7B Q4_K_M (recommended)",
+        "model_ref": "lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M",
+        "repo_id": "lmstudio-community/Qwen3-1.7B-GGUF",
+        "quant": "Q4_K_M",
+    },
+    {
+        "id": "qwen3-1.7b-q8",
+        "label": "Qwen3 1.7B Q8_0 (official)",
+        "model_ref": "Qwen/Qwen3-1.7B-GGUF:Q8_0",
+        "repo_id": "Qwen/Qwen3-1.7B-GGUF",
+        "quant": "Q8_0",
+    },
+    {
+        "id": "qwen3-0.6b-q8",
+        "label": "Qwen3 0.6B Q8_0 (fast)",
+        "model_ref": "Qwen/Qwen3-0.6B-GGUF:Q8_0",
+        "repo_id": "Qwen/Qwen3-0.6B-GGUF",
+        "quant": "Q8_0",
+    },
+    {
+        "id": "qwen3-4b-q4-k-m",
+        "label": "Qwen3 4B Q4_K_M (better)",
+        "model_ref": "Qwen/Qwen3-4B-GGUF:Q4_K_M",
+        "repo_id": "Qwen/Qwen3-4B-GGUF",
+        "quant": "Q4_K_M",
+    },
+]
 
 
 TRANSLATIONS = {
@@ -435,6 +537,86 @@ def app_directory() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def models_directory() -> Path:
+    return app_directory() / "models"
+
+
+def whisper_presets(language: str) -> list[dict[str, str]]:
+    return WHISPER_MODEL_PRESETS.get(language, WHISPER_MODEL_PRESETS[DEFAULT_TRANSCRIPTION_LANGUAGE])
+
+
+def whisper_preset_by_id(language: str, preset_id: str) -> Optional[dict[str, str]]:
+    for preset in whisper_presets(language):
+        if preset["id"] == preset_id:
+            return preset
+    return None
+
+
+def default_whisper_preset(language: str) -> dict[str, str]:
+    return whisper_presets(language)[0]
+
+
+def whisper_preset_local_dir(preset: dict[str, str]) -> Path:
+    return models_directory() / preset["local_dir"]
+
+
+def llm_models_directory() -> Path:
+    return models_directory() / "llm"
+
+
+def llm_preset_by_id(preset_id: str) -> Optional[dict[str, str]]:
+    for preset in LLM_MODEL_PRESETS:
+        if preset["id"] == preset_id:
+            return preset
+    return None
+
+
+def llm_preset_by_label(label: str) -> Optional[dict[str, str]]:
+    for preset in LLM_MODEL_PRESETS:
+        if preset["label"] == label:
+            return preset
+    return None
+
+
+def llm_preset_label(preset_id: str) -> str:
+    preset = llm_preset_by_id(preset_id)
+    return preset["label"] if preset is not None else CUSTOM_MODEL_PRESET_LABEL
+
+
+def default_llm_preset() -> dict[str, str]:
+    return LLM_MODEL_PRESETS[0]
+
+
+def llm_preset_model_dir(preset: dict[str, str]) -> Path:
+    safe_repo = re.sub(r"[^A-Za-z0-9_.-]+", "_", preset["repo_id"])
+    return llm_models_directory() / safe_repo
+
+
+def llm_local_path_matches_preset(path: Path, preset: dict[str, str]) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    if preset["quant"].lower() not in path.name.lower():
+        return False
+    try:
+        path.relative_to(llm_preset_model_dir(preset))
+        return True
+    except ValueError:
+        repo_name = preset["repo_id"].split("/")[-1].lower()
+        model_name = repo_name.removesuffix("-gguf")
+        return model_name in path.name.lower()
+
+
+def find_downloaded_llm_model(preset: dict[str, str]) -> Optional[Path]:
+    model_dir = llm_preset_model_dir(preset)
+    if not model_dir.exists():
+        return None
+    quant = preset["quant"].lower()
+    candidates = [path for path in model_dir.rglob("*.gguf") if quant in path.name.lower()]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda path: (len(path.name), str(path)))[0]
 
 
 def screenshot_folder_name() -> str:
@@ -702,6 +884,9 @@ def simplify_chinese_text(language: str = DEFAULT_TRANSCRIPTION_LANGUAGE) -> boo
 
 
 def default_realtime_settings() -> dict[str, Any]:
+    english_preset = default_whisper_preset("en")
+    chinese_preset = default_whisper_preset("zh")
+    llm_preset = default_llm_preset()
     return {
         "sample_rate": TRANSCRIBE_SAMPLE_RATE,
         "whisper_device": WHISPER_DEVICE,
@@ -718,7 +903,8 @@ def default_realtime_settings() -> dict[str, Any]:
         "auto_screenshot_interval_seconds": AUTO_SCREENSHOT_INTERVAL_SECONDS,
         "llm_summary_enabled": True,
         "llm_summary_base_url": "http://127.0.0.1:8080/v1/chat/completions",
-        "llm_summary_model": "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M",
+        "llm_model_preset": llm_preset["id"],
+        "llm_summary_model": llm_preset["model_ref"],
         "llm_summary_timeout_seconds": 300.0,
         "llm_summary_max_input_chars": 12000,
         "llm_summary_chunk_chars": 6000,
@@ -730,7 +916,8 @@ def default_realtime_settings() -> dict[str, Any]:
         "llm_merge_summary_prompt": DEFAULT_LLM_MERGE_SUMMARY_PROMPT,
         "llm_server_managed": True,
         "llm_server_executable": "",
-        "llm_server_model_ref": "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M",
+        "llm_server_model_ref": llm_preset["model_ref"],
+        "llm_server_model_path": "",
         "llm_server_host": "127.0.0.1",
         "llm_server_port": 8080,
         "llm_server_context": 4096,
@@ -743,9 +930,11 @@ def default_realtime_settings() -> dict[str, Any]:
         "llm_resume_idle_seconds": 30.0,
         "languages": {
             "en": {
-                "model_name": ENGLISH_WHISPER_MODEL,
-                "model_dir": str(ENGLISH_MODEL_DIR),
-                "language": "en",
+                "model_preset": english_preset["id"],
+                "model_repo_id": english_preset["repo_id"],
+                "model_name": english_preset["model_name"],
+                "model_dir": str(whisper_preset_local_dir(english_preset)),
+                "language": english_preset["language"],
                 "transcribe_seconds": realtime_transcribe_seconds("en"),
                 "overlap_seconds": 0.0,
                 "beam_size": realtime_beam_size("en"),
@@ -754,9 +943,11 @@ def default_realtime_settings() -> dict[str, Any]:
                 "simplify_chinese": simplify_chinese_text("en"),
             },
             "zh": {
-                "model_name": CHINESE_WHISPER_MODEL,
-                "model_dir": str(CHINESE_MODEL_DIR),
-                "language": "zh",
+                "model_preset": chinese_preset["id"],
+                "model_repo_id": chinese_preset["repo_id"],
+                "model_name": chinese_preset["model_name"],
+                "model_dir": str(whisper_preset_local_dir(chinese_preset)),
+                "language": chinese_preset["language"],
                 "transcribe_seconds": realtime_transcribe_seconds("zh"),
                 "overlap_seconds": 0.0,
                 "beam_size": realtime_beam_size("zh"),
@@ -906,6 +1097,10 @@ class RecordingSession:
     transcript_lock: threading.Lock = field(default_factory=threading.Lock)
     text_saved_path: Optional[Path] = None
     stop_reason: str = ""
+    disk_write_interval_seconds: float = TRANSCRIBE_SECONDS
+    last_mp3_write_monotonic: float = field(default_factory=time.monotonic)
+    last_text_write_monotonic: float = field(default_factory=time.monotonic)
+    pending_text_write: bool = False
 
     def cleanup(self) -> None:
         return
@@ -1896,14 +2091,16 @@ class OfflineTranscriptWindow:
         if language not in TRANSCRIPTION_MODEL_CONFIGS:
             language = DEFAULT_TRANSCRIPTION_LANGUAGE
         prompt = self.app.realtime_initial_prompt(language)
+        model_path = self.app.realtime_model_path(language)
+        whisper_language = self.app.realtime_whisper_language(language)
         return {
             "language": language,
-            "model_path": whisper_model_path(language),
+            "model_path": model_path,
             "device": self.device_var.get().strip() or WHISPER_DEVICE,
             "compute_type": self.compute_type_var.get().strip() or WHISPER_COMPUTE_TYPE,
             "cpu_threads": max(1, int(self.cpu_threads_var.get())),
             "num_workers": max(1, int(self.num_workers_var.get())),
-            "whisper_language": whisper_language_code(language),
+            "whisper_language": whisper_language,
             "condition_on_previous_text": bool(self.condition_var.get()),
             "initial_prompt": prompt,
             "simplify_chinese": bool(self.simplify_var.get()),
@@ -2315,6 +2512,14 @@ class SystemSettingsWindow:
         self.summary_prompt_widgets: dict[str, tk.Text] = {}
         self.language_vars: dict[str, dict[str, tk.Variable]] = {}
         self.prompt_widgets: dict[str, tk.Text] = {}
+        self.model_download_status_vars: dict[str, tk.StringVar] = {}
+        self.model_download_progress_vars: dict[str, tk.DoubleVar] = {}
+        self.model_download_buttons: dict[str, ttk.Button] = {}
+        self.model_download_threads: dict[str, threading.Thread] = {}
+        self.llm_download_status_var = tk.StringVar(value="")
+        self.llm_download_progress_var = tk.DoubleVar(value=0.0)
+        self.llm_download_button: Optional[ttk.Button] = None
+        self.llm_download_thread: Optional[threading.Thread] = None
 
         self._build_ui()
         self.load_values(app.realtime_settings)
@@ -2422,6 +2627,7 @@ class SystemSettingsWindow:
     def _add_summary_controls(self, parent: ttk.Frame) -> None:
         self.summary_vars = {
             "llm_summary_enabled": tk.BooleanVar(),
+            "llm_model_preset": tk.StringVar(),
             "llm_summary_base_url": tk.StringVar(),
             "llm_summary_model": tk.StringVar(),
             "llm_summary_timeout_seconds": tk.DoubleVar(),
@@ -2432,6 +2638,7 @@ class SystemSettingsWindow:
             "llm_server_managed": tk.BooleanVar(),
             "llm_server_executable": tk.StringVar(),
             "llm_server_model_ref": tk.StringVar(),
+            "llm_server_model_path": tk.StringVar(),
             "llm_server_host": tk.StringVar(),
             "llm_server_port": tk.IntVar(),
             "llm_server_context": tk.IntVar(),
@@ -2456,6 +2663,40 @@ class SystemSettingsWindow:
             variable=self.summary_vars["llm_server_managed"],
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
         row += 1
+        ttk.Label(parent, text="LLM model preset").grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
+        llm_preset_values = [CUSTOM_MODEL_PRESET_LABEL] + [preset["label"] for preset in LLM_MODEL_PRESETS]
+        llm_combo = ttk.Combobox(
+            parent,
+            textvariable=self.summary_vars["llm_model_preset"],
+            values=llm_preset_values,
+            state="readonly",
+            width=34,
+        )
+        llm_combo.grid(row=row, column=1, sticky="w", pady=(8, 0))
+        llm_combo.bind("<<ComboboxSelected>>", lambda _event: self.on_llm_preset_selected())
+        row += 1
+        llm_tools = ttk.Frame(parent)
+        llm_tools.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        llm_tools.columnconfigure(1, weight=1)
+        self.llm_download_button = ttk.Button(
+            llm_tools,
+            text="Download LLM model",
+            command=self.start_llm_model_download,
+        )
+        self.llm_download_button.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Progressbar(
+            llm_tools,
+            maximum=100.0,
+            variable=self.llm_download_progress_var,
+        ).grid(row=0, column=1, sticky="ew")
+        ttk.Label(llm_tools, textvariable=self.llm_download_status_var, wraplength=420).grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(4, 0),
+        )
+        row += 1
         for key, label in (
             ("llm_summary_base_url", "OpenAI-compatible URL"),
             ("llm_summary_model", "Model"),
@@ -2466,6 +2707,7 @@ class SystemSettingsWindow:
             ("llm_summary_temperature", "Temperature"),
             ("llm_server_executable", "llama executable"),
             ("llm_server_model_ref", "llama model ref"),
+            ("llm_server_model_path", "llama local model path"),
             ("llm_server_host", "llama host"),
             ("llm_server_port", "llama port"),
             ("llm_server_context", "llama context"),
@@ -2521,6 +2763,8 @@ class SystemSettingsWindow:
 
     def _add_language_controls(self, parent: ttk.Frame, language: str) -> None:
         vars_for_language: dict[str, tk.Variable] = {
+            "model_preset": tk.StringVar(),
+            "model_repo_id": tk.StringVar(),
             "model_name": tk.StringVar(),
             "model_dir": tk.StringVar(),
             "language": tk.StringVar(),
@@ -2532,6 +2776,45 @@ class SystemSettingsWindow:
         }
         self.language_vars[language] = vars_for_language
         row = 0
+        ttk.Label(parent, text="Model preset").grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
+        preset_values = [CUSTOM_MODEL_PRESET_LABEL] + [preset["label"] for preset in whisper_presets(language)]
+        preset_combo = ttk.Combobox(
+            parent,
+            textvariable=vars_for_language["model_preset"],
+            values=preset_values,
+            state="readonly",
+            width=34,
+        )
+        preset_combo.grid(row=row, column=1, sticky="w", pady=(8, 0))
+        preset_combo.bind("<<ComboboxSelected>>", lambda _event, lang=language: self.on_model_preset_selected(lang))
+        row += 1
+
+        self.model_download_status_vars[language] = tk.StringVar(value="")
+        self.model_download_progress_vars[language] = tk.DoubleVar(value=0.0)
+        model_tools = ttk.Frame(parent)
+        model_tools.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        model_tools.columnconfigure(1, weight=1)
+        download_button = ttk.Button(
+            model_tools,
+            text="Download model",
+            command=lambda lang=language: self.start_model_download(lang),
+        )
+        download_button.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.model_download_buttons[language] = download_button
+        ttk.Progressbar(
+            model_tools,
+            maximum=100.0,
+            variable=self.model_download_progress_vars[language],
+        ).grid(row=0, column=1, sticky="ew")
+        ttk.Label(model_tools, textvariable=self.model_download_status_vars[language], wraplength=420).grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(4, 0),
+        )
+        row += 1
+
         for key, label in (
             ("model_name", "Model"),
             ("model_dir", "Local model dir"),
@@ -2567,6 +2850,268 @@ class SystemSettingsWindow:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
         ttk.Entry(parent, textvariable=variable, width=28).grid(row=row, column=1, sticky="w", pady=(8, 0))
 
+    def model_preset_by_label(self, language: str, label: str) -> Optional[dict[str, str]]:
+        for preset in whisper_presets(language):
+            if preset["label"] == label:
+                return preset
+        return None
+
+    def model_preset_label(self, language: str, preset_id: str) -> str:
+        preset = whisper_preset_by_id(language, preset_id)
+        return preset["label"] if preset is not None else CUSTOM_MODEL_PRESET_LABEL
+
+    def infer_model_preset(self, language: str, config: dict[str, Any]) -> Optional[dict[str, str]]:
+        configured_id = str(config.get("model_preset", "") or "")
+        preset = whisper_preset_by_id(language, configured_id)
+        if preset is not None:
+            return preset
+        model_name = str(config.get("model_name", "") or "")
+        repo_id = str(config.get("model_repo_id", "") or "")
+        local_dir = str(config.get("model_dir", "") or "")
+        for candidate in whisper_presets(language):
+            if repo_id and repo_id == candidate["repo_id"]:
+                return candidate
+            if model_name and model_name == candidate["model_name"]:
+                return candidate
+            if local_dir and Path(local_dir).name == candidate["local_dir"]:
+                return candidate
+        return None
+
+    def apply_model_preset(self, language: str, preset: dict[str, str], auto_download: bool) -> None:
+        vars_for_language = self.language_vars[language]
+        vars_for_language["model_preset"].set(preset["label"])
+        vars_for_language["model_repo_id"].set(preset["repo_id"])
+        vars_for_language["model_name"].set(preset["model_name"])
+        vars_for_language["model_dir"].set(str(whisper_preset_local_dir(preset)))
+        vars_for_language["language"].set(preset["language"])
+        if language == "zh":
+            vars_for_language["simplify_chinese"].set(True)
+        else:
+            vars_for_language["simplify_chinese"].set(False)
+        self.refresh_model_download_status(language)
+        if auto_download and not usable_model_dir(Path(str(vars_for_language["model_dir"].get()))):
+            self.start_model_download(language)
+
+    def on_model_preset_selected(self, language: str) -> None:
+        label = str(self.language_vars[language]["model_preset"].get() or "")
+        preset = self.model_preset_by_label(language, label)
+        if preset is None:
+            self.language_vars[language]["model_repo_id"].set("")
+            self.refresh_model_download_status(language)
+            self.mark_settings_dirty()
+            return
+        self.apply_model_preset(language, preset, auto_download=True)
+        self.mark_settings_dirty()
+
+    def refresh_model_download_status(self, language: str) -> None:
+        status_var = self.model_download_status_vars.get(language)
+        progress_var = self.model_download_progress_vars.get(language)
+        if status_var is None or progress_var is None:
+            return
+        model_dir = Path(str(self.language_vars[language]["model_dir"].get() or ""))
+        repo_id = str(self.language_vars[language]["model_repo_id"].get() or "")
+        if usable_model_dir(model_dir):
+            status_var.set(f"Local model ready: {model_dir}")
+            progress_var.set(100.0)
+        elif repo_id:
+            status_var.set("Local model not found. Select this preset or click Download model.")
+            progress_var.set(0.0)
+        else:
+            status_var.set("Custom model. Edit Model / Local model dir manually.")
+            progress_var.set(0.0)
+
+    def start_model_download(self, language: str) -> None:
+        thread = self.model_download_threads.get(language)
+        if thread is not None and thread.is_alive():
+            return
+        vars_for_language = self.language_vars[language]
+        repo_id = str(vars_for_language["model_repo_id"].get() or "").strip()
+        target_dir = Path(str(vars_for_language["model_dir"].get() or "").strip())
+        if not repo_id:
+            messagebox.showinfo(self.window.title(), "Choose a downloadable model preset first.")
+            return
+        if usable_model_dir(target_dir):
+            self.refresh_model_download_status(language)
+            return
+        button = self.model_download_buttons.get(language)
+        if button is not None:
+            button.configure(state=tk.DISABLED)
+        self.model_download_progress_vars[language].set(0.0)
+        self.model_download_status_vars[language].set(f"Starting download: {repo_id}")
+        thread = threading.Thread(
+            target=self.download_model_worker,
+            args=(language, repo_id, target_dir),
+            name=f"model-download-{language}",
+            daemon=True,
+        )
+        self.model_download_threads[language] = thread
+        thread.start()
+
+    def update_model_download_progress(self, language: str, percent: float, message: str) -> None:
+        if language in self.model_download_progress_vars:
+            self.model_download_progress_vars[language].set(percent)
+        if language in self.model_download_status_vars:
+            self.model_download_status_vars[language].set(message)
+
+    def finish_model_download(self, language: str, target_dir: Path, error: Optional[Exception]) -> None:
+        button = self.model_download_buttons.get(language)
+        if button is not None:
+            button.configure(state=tk.NORMAL)
+        if error is not None:
+            self.update_model_download_progress(language, 0.0, f"Download failed: {error}")
+            messagebox.showerror(self.window.title(), f"Model download failed:\n{error}")
+            return
+        if usable_model_dir(target_dir):
+            self.update_model_download_progress(language, 100.0, f"Download complete: {target_dir}")
+        else:
+            self.update_model_download_progress(language, 100.0, f"Download finished, but model files look incomplete: {target_dir}")
+        self.mark_settings_dirty()
+
+    def download_model_worker(self, language: str, repo_id: str, target_dir: Path) -> None:
+        try:
+            from huggingface_hub import HfApi, hf_hub_download
+
+            target_dir.mkdir(parents=True, exist_ok=True)
+            files = [
+                filename
+                for filename in HfApi().list_repo_files(repo_id)
+                if filename and not filename.endswith(".gitattributes")
+            ]
+            if not files:
+                raise RuntimeError(f"No files found in {repo_id}")
+            total = len(files)
+            for index, filename in enumerate(files, start=1):
+                percent = (index - 1) / total * 100.0
+                self.root.after(
+                    0,
+                    lambda lang=language, value=percent, name=filename, idx=index, count=total: self.update_model_download_progress(
+                        lang,
+                        value,
+                        f"Downloading {idx}/{count}: {name}",
+                    ),
+                )
+                hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(target_dir))
+                self.root.after(
+                    0,
+                    lambda lang=language, value=index / total * 100.0, idx=index, count=total: self.update_model_download_progress(
+                        lang,
+                        value,
+                        f"Downloaded {idx}/{count}",
+                    ),
+                )
+            self.root.after(0, lambda lang=language, path=target_dir: self.finish_model_download(lang, path, None))
+        except Exception as exc:
+            self.root.after(0, lambda lang=language, path=target_dir, error=exc: self.finish_model_download(lang, path, error))
+
+    def infer_llm_preset(self, settings: dict[str, Any]) -> Optional[dict[str, str]]:
+        preset = llm_preset_by_id(str(settings.get("llm_model_preset", "") or ""))
+        if preset is not None:
+            return preset
+        model_ref = str(settings.get("llm_server_model_ref", settings.get("llm_summary_model", "")) or "")
+        for candidate in LLM_MODEL_PRESETS:
+            if model_ref == candidate["model_ref"]:
+                return candidate
+        return None
+
+    def on_llm_preset_selected(self) -> None:
+        preset = llm_preset_by_label(str(self.summary_vars["llm_model_preset"].get() or ""))
+        if preset is None:
+            self.refresh_llm_download_status()
+            return
+        self.summary_vars["llm_summary_model"].set(preset["model_ref"])
+        self.summary_vars["llm_server_model_ref"].set(preset["model_ref"])
+        current_path = Path(str(self.summary_vars["llm_server_model_path"].get() or ""))
+        if not llm_local_path_matches_preset(current_path, preset):
+            downloaded_path = find_downloaded_llm_model(preset)
+            self.summary_vars["llm_server_model_path"].set(str(downloaded_path or ""))
+        self.refresh_llm_download_status()
+        self.mark_settings_dirty()
+
+    def refresh_llm_download_status(self) -> None:
+        preset = llm_preset_by_label(str(self.summary_vars.get("llm_model_preset", tk.StringVar()).get() or ""))
+        if preset is None:
+            local_path = Path(str(self.summary_vars.get("llm_server_model_path", tk.StringVar()).get() or ""))
+            if local_path.exists() and local_path.is_file():
+                self.llm_download_status_var.set(f"Custom local LLM ready: {local_path}")
+                self.llm_download_progress_var.set(100.0)
+                return
+            self.llm_download_status_var.set("Custom LLM model. Edit llama model ref or local model path manually.")
+            self.llm_download_progress_var.set(0.0)
+            return
+        local_path = Path(str(self.summary_vars.get("llm_server_model_path", tk.StringVar()).get() or ""))
+        if llm_local_path_matches_preset(local_path, preset):
+            self.llm_download_status_var.set(f"Local LLM ready: {local_path}")
+            self.llm_download_progress_var.set(100.0)
+            return
+        downloaded_path = find_downloaded_llm_model(preset)
+        if downloaded_path is not None:
+            self.summary_vars["llm_server_model_path"].set(str(downloaded_path))
+            self.llm_download_status_var.set(f"Local LLM ready: {downloaded_path}")
+            self.llm_download_progress_var.set(100.0)
+            return
+        self.summary_vars["llm_server_model_path"].set("")
+        self.llm_download_status_var.set("Local LLM file not set. Click Download LLM model or use llama -hf on demand.")
+        self.llm_download_progress_var.set(0.0)
+
+    def start_llm_model_download(self) -> None:
+        if self.llm_download_thread is not None and self.llm_download_thread.is_alive():
+            return
+        preset = llm_preset_by_label(str(self.summary_vars["llm_model_preset"].get() or ""))
+        if preset is None:
+            messagebox.showinfo(self.window.title(), "Choose a downloadable LLM preset first.")
+            return
+        if self.llm_download_button is not None:
+            self.llm_download_button.configure(state=tk.DISABLED)
+        self.llm_download_progress_var.set(0.0)
+        self.llm_download_status_var.set(f"Starting download: {preset['model_ref']}")
+        self.llm_download_thread = threading.Thread(
+            target=self.download_llm_model_worker,
+            args=(preset,),
+            name="llm-model-download",
+            daemon=True,
+        )
+        self.llm_download_thread.start()
+
+    def update_llm_download_progress(self, percent: float, message: str) -> None:
+        self.llm_download_progress_var.set(percent)
+        self.llm_download_status_var.set(message)
+
+    def finish_llm_model_download(self, local_path: Optional[Path], error: Optional[Exception]) -> None:
+        if self.llm_download_button is not None:
+            self.llm_download_button.configure(state=tk.NORMAL)
+        if error is not None:
+            self.update_llm_download_progress(0.0, f"LLM download failed: {error}")
+            messagebox.showerror(self.window.title(), f"LLM model download failed:\n{error}")
+            return
+        if local_path is not None:
+            self.summary_vars["llm_server_model_path"].set(str(local_path))
+            self.update_llm_download_progress(100.0, f"LLM download complete: {local_path}")
+            self.mark_settings_dirty()
+
+    def download_llm_model_worker(self, preset: dict[str, str]) -> None:
+        try:
+            from huggingface_hub import HfApi, hf_hub_download
+
+            repo_id = preset["repo_id"]
+            quant = preset["quant"].lower()
+            self.root.after(0, lambda: self.update_llm_download_progress(5.0, f"Listing files: {repo_id}"))
+            files = HfApi().list_repo_files(repo_id)
+            candidates = [
+                filename
+                for filename in files
+                if filename.lower().endswith(".gguf") and quant in filename.lower()
+            ]
+            if not candidates:
+                raise RuntimeError(f"No GGUF file matching {preset['quant']} found in {repo_id}")
+            filename = sorted(candidates, key=len)[0]
+            target_dir = llm_preset_model_dir(preset)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            self.root.after(0, lambda name=filename: self.update_llm_download_progress(15.0, f"Downloading {name}"))
+            local_path = Path(hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(target_dir)))
+            self.root.after(0, lambda path=local_path: self.finish_llm_model_download(path, None))
+        except Exception as exc:
+            self.root.after(0, lambda error=exc: self.finish_llm_model_download(None, error))
+
     def load_values(self, settings: dict[str, Any]) -> None:
         for key, variable in self.common_vars.items():
             if key in settings:
@@ -2574,6 +3119,12 @@ class SystemSettingsWindow:
         for key, variable in self.summary_vars.items():
             if key in settings:
                 variable.set(settings[key])
+        llm_preset = self.infer_llm_preset(settings)
+        if llm_preset is not None:
+            self.summary_vars["llm_model_preset"].set(llm_preset["label"])
+        else:
+            self.summary_vars["llm_model_preset"].set(CUSTOM_MODEL_PRESET_LABEL)
+        self.refresh_llm_download_status()
         defaults = default_realtime_settings()
         for key, widget in self.summary_prompt_widgets.items():
             widget.delete("1.0", tk.END)
@@ -2586,32 +3137,61 @@ class SystemSettingsWindow:
             config = languages.get(language, {})
             if not isinstance(config, dict):
                 config = {}
+            preset = self.infer_model_preset(language, config)
             for key, variable in vars_for_language.items():
+                if key == "model_preset":
+                    continue
                 if key in config:
                     variable.set(config[key])
+            if preset is not None:
+                vars_for_language["model_preset"].set(preset["label"])
+                if not vars_for_language["model_repo_id"].get():
+                    vars_for_language["model_repo_id"].set(preset["repo_id"])
+            else:
+                vars_for_language["model_preset"].set(CUSTOM_MODEL_PRESET_LABEL)
             prompt = self.prompt_widgets[language]
             prompt.delete("1.0", tk.END)
             prompt.insert(tk.END, str(config.get("initial_prompt", "") or ""))
+            self.refresh_model_download_status(language)
 
     def collect_values(self) -> dict[str, Any]:
         settings = default_realtime_settings()
         for key, variable in self.common_vars.items():
             settings[key] = variable.get()
         for key, variable in self.summary_vars.items():
+            if key == "llm_model_preset":
+                continue
             settings[key] = variable.get()
+        llm_preset = llm_preset_by_label(str(self.summary_vars["llm_model_preset"].get() or ""))
+        settings["llm_model_preset"] = llm_preset["id"] if llm_preset is not None else ""
+        if llm_preset is not None:
+            settings["llm_summary_model"] = llm_preset["model_ref"]
+            settings["llm_server_model_ref"] = llm_preset["model_ref"]
+            model_path = Path(str(settings.get("llm_server_model_path", "") or ""))
+            if not llm_local_path_matches_preset(model_path, llm_preset):
+                settings["llm_server_model_path"] = str(find_downloaded_llm_model(llm_preset) or "")
         for key, widget in self.summary_prompt_widgets.items():
             settings[key] = widget.get("1.0", tk.END).strip()
         settings["languages"] = {}
         for language, vars_for_language in self.language_vars.items():
             config: dict[str, Any] = {}
             for key, variable in vars_for_language.items():
+                if key == "model_preset":
+                    continue
                 config[key] = variable.get()
+            preset = self.model_preset_by_label(language, str(vars_for_language["model_preset"].get() or ""))
+            config["model_preset"] = preset["id"] if preset is not None else ""
+            if preset is not None:
+                config["model_repo_id"] = preset["repo_id"]
             config["initial_prompt"] = self.prompt_widgets[language].get("1.0", tk.END).strip()
             settings["languages"][language] = config
         return settings
 
     def reset_defaults(self) -> None:
         self.load_values(default_realtime_settings())
+
+    def mark_settings_dirty(self) -> None:
+        pass
 
     def save(self) -> None:
         try:
@@ -2801,9 +3381,11 @@ class MeetingRecorderApp:
                 merge_dict(settings, stored_settings)
                 merge_dict(offline_settings, data.get("offline_transcript_settings"))
                 if needs_llm_migration:
+                    llm_preset = default_llm_preset()
                     settings["llm_summary_enabled"] = True
-                    settings["llm_summary_model"] = "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M"
-                    settings["llm_server_model_ref"] = "ggml-org/Qwen3-1.7B-GGUF:Q4_K_M"
+                    settings["llm_model_preset"] = llm_preset["id"]
+                    settings["llm_summary_model"] = llm_preset["model_ref"]
+                    settings["llm_server_model_ref"] = llm_preset["model_ref"]
                     settings["llm_server_managed"] = True
                     settings["llm_server_context"] = 4096
                     settings["llm_server_slots"] = 1
@@ -2912,12 +3494,19 @@ class MeetingRecorderApp:
             return f"{transcript}\n\n{minutes}"
         return transcript or minutes
 
-    def write_partial_transcript(self, session: RecordingSession, text: str) -> None:
+    def write_partial_transcript(self, session: RecordingSession, text: str, force: bool = False) -> None:
         if session.text_partial_path is None:
+            return
+        now = time.monotonic()
+        interval = max(1.0, float(session.disk_write_interval_seconds))
+        if not force and now - session.last_text_write_monotonic < interval:
+            session.pending_text_write = True
             return
         try:
             session.text_partial_path.parent.mkdir(parents=True, exist_ok=True)
             session.text_partial_path.write_text(text, encoding="utf-8")
+            session.last_text_write_monotonic = now
+            session.pending_text_write = False
         except Exception as exc:
             logging.warning("Could not write partial transcript %s: %s", session.text_partial_path, exc)
 
@@ -3424,6 +4013,11 @@ class MeetingRecorderApp:
             realtime_settings=settings_snapshot,
             recognition_prompt=recognition_prompt,
         )
+        language_config = settings_snapshot.get("languages", {}).get(transcription_language, {})
+        session.disk_write_interval_seconds = max(
+            1.0,
+            float(language_config.get("transcribe_seconds", realtime_transcribe_seconds(transcription_language))),
+        )
         chunk_seconds = max(0.05, float(settings_snapshot.get("chunk_seconds", CHUNK_SECONDS)))
         session.transcription_source_queue = queue.Queue(
             maxsize=max(1, int(TRANSCRIPTION_SOURCE_QUEUE_SECONDS / chunk_seconds))
@@ -3433,7 +4027,7 @@ class MeetingRecorderApp:
         self.clear_transcript()
         if self.transcript_window is not None:
             self.transcript_window.set_text("")
-        self.write_partial_transcript(session, "")
+        self.write_partial_transcript(session, "", force=True)
 
         self.session = session
         with self.state_lock:
@@ -3912,6 +4506,21 @@ class MeetingRecorderApp:
             encoder.set_channels(CHANNELS)
             encoder.set_quality(2)
 
+            write_buffer = bytearray()
+            write_interval = max(1.0, float(session.disk_write_interval_seconds))
+            session.last_mp3_write_monotonic = time.monotonic()
+
+            def flush_buffer(force: bool = False) -> None:
+                now = time.monotonic()
+                if not write_buffer:
+                    return
+                if not force and now - session.last_mp3_write_monotonic < write_interval:
+                    return
+                mp3_file.write(write_buffer)
+                write_buffer.clear()
+                mp3_file.flush()
+                session.last_mp3_write_monotonic = now
+
             with session.mp3_partial_path.open("wb") as mp3_file:
                 while True:
                     frame_set = session.mp3_queue.get()
@@ -3927,13 +4536,13 @@ class MeetingRecorderApp:
 
                     mp3_chunk = encoder.encode(pcm_bytes)
                     if mp3_chunk:
-                        mp3_file.write(mp3_chunk)
-                        mp3_file.flush()
+                        write_buffer.extend(mp3_chunk)
+                        flush_buffer()
 
                 final_chunk = encoder.flush()
                 if final_chunk:
-                    mp3_file.write(final_chunk)
-                mp3_file.flush()
+                    write_buffer.extend(final_chunk)
+                flush_buffer(force=True)
         except Exception as exc:
             session.stop_event.set()
             self.root.after(0, lambda error=exc: self.handle_recording_error(session, error))
@@ -5234,7 +5843,7 @@ class MeetingRecorderApp:
         mp3_target = session.mp3_final_path or (output_directory() / f"{session.file_stem}.mp3")
         text_target = session.text_final_path or mp3_target.with_suffix(".txt")
         mp3_target.parent.mkdir(parents=True, exist_ok=True)
-        self.write_partial_transcript(session, transcript)
+        self.write_partial_transcript(session, transcript, force=True)
 
         if session.mp3_partial_path is not None and session.mp3_partial_path.exists():
             logging.info("stop[%s] rename mp3 partial %s -> %s", session.file_stem, session.mp3_partial_path, mp3_target)
@@ -5505,6 +6114,7 @@ class MeetingRecorderApp:
             if self.llm_process is None:
                 executable = self.resolve_llm_executable(settings)
                 model_ref = str(settings.get("llm_server_model_ref", settings.get("llm_summary_model", "")) or "").strip()
+                model_path = str(settings.get("llm_server_model_path", "") or "").strip()
                 host = str(settings.get("llm_server_host", "127.0.0.1") or "127.0.0.1").strip()
                 port = str(max(1, int(settings.get("llm_server_port", 8080))))
                 context_size = str(max(512, int(settings.get("llm_server_context", 4096))))
@@ -5513,13 +6123,18 @@ class MeetingRecorderApp:
                 executable_name = Path(executable).name.lower()
                 if "llama-server" not in executable_name:
                     command.append("serve")
-                command.extend(["-hf", model_ref, "--host", host, "--port", port, "-c", context_size, "-np", slots])
+                if model_path and Path(model_path).exists():
+                    command.extend(["-m", model_path, "--host", host, "--port", port, "-c", context_size, "-np", slots])
+                    model_source = model_path
+                else:
+                    command.extend(["-hf", model_ref, "--host", host, "--port", port, "-c", context_size, "-np", slots])
+                    model_source = model_ref
                 extra_args = str(settings.get("llm_server_extra_args", "") or "").strip()
                 if extra_args:
                     command.extend(shlex.split(extra_args, posix=False))
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
                 try:
-                    logging.info("summary starting managed LLM: executable=%s model=%s host=%s port=%s context=%s slots=%s", executable, model_ref, host, port, context_size, slots)
+                    logging.info("summary starting managed LLM: executable=%s model=%s host=%s port=%s context=%s slots=%s", executable, model_source, host, port, context_size, slots)
                     self.llm_process = subprocess.Popen(
                         command,
                         cwd=str(app_directory()),
@@ -5602,7 +6217,7 @@ class MeetingRecorderApp:
                 self.transcript_body_text = text
                 self.meeting_minutes_text = ""
                 self.transcript_text = text
-        self.write_partial_transcript(session, text)
+        self.write_partial_transcript(session, text, force=True)
         if self.session is session:
             self.root.after(0, lambda active_session=session, current_text=text: self.refresh_transcript_text(active_session, current_text))
 
