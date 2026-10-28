@@ -21,6 +21,13 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+# pythonw and windowed executables have no console streams. Download libraries
+# still write progress to stderr, so provide a sink before importing them.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 import numpy as np
 import pystray
 import tkinter as tk
@@ -29,6 +36,9 @@ from pystray import Menu, MenuItem
 from tkinter import filedialog, messagebox, ttk
 
 from transcriber_worker import run_transcriber_process
+from summary_queue import SummaryQueueStore
+from meeting_end import MeetingEndPolicy
+from desktop_ui import (EmbeddedPanel, SummaryQueueView, MouseWheelRouter, CopyTextRouter, SelectableLabel, SelectableCheckbutton, SelectableRadiobutton, selectable_label_frame)
 
 
 APP_NAME = "Local Meeting Recorder"
@@ -901,6 +911,10 @@ def default_realtime_settings() -> dict[str, Any]:
         "capture_read_seconds": CAPTURE_READ_SECONDS,
         "capture_block_seconds": CAPTURE_BLOCK_SECONDS,
         "auto_screenshot_interval_seconds": AUTO_SCREENSHOT_INTERVAL_SECONDS,
+        "meeting_end_reminder_enabled": True,
+        "meeting_end_silence_seconds": 180.0,
+        "meeting_end_microphone_release_seconds": 60.0,
+        "meeting_end_reminder_seconds": 600.0,
         "llm_summary_enabled": True,
         "llm_summary_base_url": "http://127.0.0.1:8080/v1/chat/completions",
         "llm_model_preset": llm_preset["id"],
@@ -1101,6 +1115,10 @@ class RecordingSession:
     last_mp3_write_monotonic: float = field(default_factory=time.monotonic)
     last_text_write_monotonic: float = field(default_factory=time.monotonic)
     pending_text_write: bool = False
+    summary_job_identity: Optional[str] = None
+    meeting_end_audio_queue: object = field(default_factory=lambda: queue.Queue(maxsize=8))
+    meeting_end_policy: Optional[MeetingEndPolicy] = None
+    meeting_end_dialog: Optional[tk.Toplevel] = None
 
     def cleanup(self) -> None:
         return
@@ -1112,6 +1130,8 @@ class SummaryJob:
     transcript: str
     file_stem: str
     settings: dict[str, Any]
+    identity: str = ""
+    chunks: list[str] = field(default_factory=list)
 
 
 class SummaryPaused(Exception):
@@ -1119,10 +1139,10 @@ class SummaryPaused(Exception):
 
 
 class TranscriptWindow:
-    def __init__(self, root: tk.Tk, app: "MeetingRecorderApp") -> None:
+    def __init__(self, root: tk.Tk, app: "MeetingRecorderApp", parent=None) -> None:
         self.root = root
         self.app = app
-        self.window = tk.Toplevel(root)
+        self.window = EmbeddedPanel(parent, app, "recording") if parent is not None else tk.Toplevel(root)
         self.window.geometry("720x460")
         self.window.minsize(420, 260)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -1164,6 +1184,9 @@ class TranscriptWindow:
         self.copy_button.configure(text=self.app.t("copy_text"))
 
     def close(self) -> None:
+        if isinstance(self.window, EmbeddedPanel):
+            self.root.withdraw()
+            return
         self.app.transcript_window = None
         self.window.destroy()
 
@@ -1406,10 +1429,10 @@ class AudioMciPlayer:
 
 
 class OfflineTranscriptWindow:
-    def __init__(self, root: tk.Tk, app: "MeetingRecorderApp") -> None:
+    def __init__(self, root: tk.Tk, app: "MeetingRecorderApp", parent=None) -> None:
         self.root = root
         self.app = app
-        self.window = tk.Toplevel(root)
+        self.window = EmbeddedPanel(parent, app, "offline") if parent is not None else tk.Toplevel(root)
         self.window.title(app.t("offline_transcript"))
         self.window.geometry("1080x700")
         self.window.minsize(900, 560)
@@ -1501,30 +1524,25 @@ class OfflineTranscriptWindow:
         def resize_settings_window(event: object) -> None:
             settings_canvas.itemconfigure(settings_window, width=event.width)
 
-        def on_settings_mousewheel(event: object) -> None:
-            settings_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
         settings.bind("<Configure>", update_settings_scroll_region)
         settings_canvas.bind("<Configure>", resize_settings_window)
-        settings_canvas.bind("<Enter>", lambda _event: settings_canvas.bind_all("<MouseWheel>", on_settings_mousewheel))
-        settings_canvas.bind("<Leave>", lambda _event: settings_canvas.unbind_all("<MouseWheel>"))
 
         self.save_settings_button = ttk.Button(settings, text="Save Settings", command=self.save_settings)
         self.save_settings_button.grid(row=0, column=0, sticky="ew")
 
-        basic = ttk.LabelFrame(settings, text="Basic", padding=10)
+        basic = selectable_label_frame(settings, text="Basic", padding=10)
         basic.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         basic.columnconfigure(1, weight=1)
 
-        ttk.Label(basic, text="Language").grid(row=0, column=0, sticky="w", columnspan=2)
-        ttk.Radiobutton(
+        SelectableLabel(basic, text="Language").grid(row=0, column=0, sticky="w", columnspan=2)
+        SelectableRadiobutton(
             basic,
             text="English",
             variable=self.language_var,
             value="en",
             command=self.apply_language_defaults,
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Radiobutton(
+        SelectableRadiobutton(
             basic,
             text="Chinese",
             variable=self.language_var,
@@ -1537,31 +1555,31 @@ class OfflineTranscriptWindow:
         self._add_entry(basic, "Beam size", self.beam_size_var, 4)
         self._add_entry(basic, "Min RMS", self.min_rms_var, 5)
 
-        advanced = ttk.LabelFrame(settings, text="Advanced", padding=10)
+        advanced = selectable_label_frame(settings, text="Advanced", padding=10)
         advanced.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         advanced.columnconfigure(1, weight=1)
-        ttk.Checkbutton(advanced, text="VAD filter", variable=self.vad_var).grid(
+        SelectableCheckbutton(advanced, text="VAD filter", variable=self.vad_var).grid(
             row=0, column=0, columnspan=2, sticky="w"
         )
         self._add_entry(advanced, "VAD silence ms", self.vad_silence_ms_var, 1)
-        ttk.Checkbutton(advanced, text="Previous text", variable=self.condition_var).grid(
+        SelectableCheckbutton(advanced, text="Previous text", variable=self.condition_var).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
-        ttk.Checkbutton(advanced, text="Simplified CN", variable=self.simplify_var).grid(
+        SelectableCheckbutton(advanced, text="Simplified CN", variable=self.simplify_var).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
-        ttk.Checkbutton(
+        SelectableCheckbutton(
             advanced,
             text="Play chunks",
             variable=self.play_chunks_var,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(
+        SelectableCheckbutton(
             advanced,
             text="Log chunk timing",
             variable=self.log_timing_var,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        engine = ttk.LabelFrame(settings, text="Engine", padding=10)
+        engine = selectable_label_frame(settings, text="Engine", padding=10)
         engine.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         engine.columnconfigure(1, weight=1)
         self._add_readonly_entry(engine, "Sample rate", self.sample_rate_var, 0)
@@ -1581,7 +1599,7 @@ class OfflineTranscriptWindow:
 
         audio_row = ttk.Frame(controls)
         audio_row.grid(row=0, column=0, sticky="w")
-        ttk.Label(audio_row, text="Audio:").pack(side=tk.LEFT, padx=(0, 8))
+        SelectableLabel(audio_row, text="Audio:").pack(side=tk.LEFT, padx=(0, 8))
         self.audio_import_button = ttk.Button(audio_row, text="Import", command=self.import_audio)
         self.audio_import_button.pack(side=tk.LEFT, padx=(0, 4))
         self.audio_play_button = ttk.Button(audio_row, text="Play", command=self.play_audio)
@@ -1595,7 +1613,7 @@ class OfflineTranscriptWindow:
 
         transcript_row = ttk.Frame(controls)
         transcript_row.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(transcript_row, text="Transcript:").pack(side=tk.LEFT, padx=(0, 8))
+        SelectableLabel(transcript_row, text="Transcript:").pack(side=tk.LEFT, padx=(0, 8))
         self.start_button = ttk.Button(transcript_row, text="Start", command=self.start_transcript)
         self.start_button.pack(side=tk.LEFT, padx=(0, 4))
         self.pause_button = ttk.Button(transcript_row, text="Pause", command=self.pause_transcript)
@@ -1609,24 +1627,24 @@ class OfflineTranscriptWindow:
         status = ttk.Frame(right)
         status.grid(row=1, column=0, sticky="ew", pady=(12, 6))
         status.columnconfigure(0, weight=1)
-        ttk.Label(status, textvariable=self.file_var).grid(row=0, column=0, sticky="w")
-        ttk.Label(status, textvariable=self.duration_var).grid(row=0, column=1, sticky="e", padx=(12, 0))
+        SelectableLabel(status, textvariable=self.file_var).grid(row=0, column=0, sticky="w")
+        SelectableLabel(status, textvariable=self.duration_var).grid(row=0, column=1, sticky="e", padx=(12, 0))
         ttk.Progressbar(status, maximum=1000, variable=self.audio_progress_var).grid(
             row=1, column=0, columnspan=2, sticky="ew", pady=(6, 2)
         )
-        ttk.Label(status, textvariable=self.audio_position_var).grid(row=2, column=0, sticky="w")
+        SelectableLabel(status, textvariable=self.audio_position_var).grid(row=2, column=0, sticky="w")
         ttk.Progressbar(status, maximum=1000, variable=self.progress_var).grid(
             row=3, column=0, columnspan=2, sticky="ew", pady=(8, 2)
         )
-        ttk.Label(status, textvariable=self.processed_var).grid(row=4, column=0, sticky="w")
-        ttk.Label(status, textvariable=self.status_var).grid(row=4, column=1, sticky="e", padx=(12, 0))
+        SelectableLabel(status, textvariable=self.processed_var).grid(row=4, column=0, sticky="w")
+        SelectableLabel(status, textvariable=self.status_var).grid(row=4, column=1, sticky="e", padx=(12, 0))
 
         timing = ttk.Frame(right)
         timing.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         timing.columnconfigure((0, 1, 2), weight=1)
-        ttk.Label(timing, textvariable=self.started_var).grid(row=0, column=0, sticky="w")
-        ttk.Label(timing, textvariable=self.finished_var).grid(row=0, column=1, sticky="w")
-        ttk.Label(timing, textvariable=self.elapsed_var).grid(row=0, column=2, sticky="w")
+        SelectableLabel(timing, textvariable=self.started_var).grid(row=0, column=0, sticky="w")
+        SelectableLabel(timing, textvariable=self.finished_var).grid(row=0, column=1, sticky="w")
+        SelectableLabel(timing, textvariable=self.elapsed_var).grid(row=0, column=2, sticky="w")
 
         text_frame = ttk.Frame(right)
         text_frame.grid(row=3, column=0, sticky="nsew")
@@ -1646,11 +1664,11 @@ class OfflineTranscriptWindow:
         self.refresh_buttons()
 
     def _add_entry(self, parent: ttk.Frame, label: str, variable: tk.Variable, row: int) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0))
+        SelectableLabel(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(parent, textvariable=variable, width=8).grid(row=row, column=1, sticky="ew", pady=(8, 0))
 
     def _add_readonly_entry(self, parent: ttk.Frame, label: str, variable: tk.Variable, row: int) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0))
+        SelectableLabel(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(parent, textvariable=variable, width=8, state="readonly").grid(
             row=row,
             column=1,
@@ -2013,28 +2031,15 @@ class OfflineTranscriptWindow:
             messagebox.showinfo(self.window.title(), "No transcript text is available yet.")
             return
 
-        self.summary_running = True
-        self.set_status("Generating minutes...")
-        self.refresh_buttons()
-        self.summary_thread = threading.Thread(
-            target=self.generate_minutes_worker,
-            args=(transcript,),
-            name="offline-minutes",
-            daemon=True,
-        )
-        self.summary_thread.start()
-
-    def generate_minutes_worker(self, transcript: str) -> None:
-        lower_current_thread_priority()
-        try:
-            minutes = self.app.build_meeting_summary(transcript, debug_name=self.offline_file_stem)
-        except Exception as exc:
-            with contextlib.suppress(Exception):
-                self.root.after(0, lambda error=exc: self.finish_generate_minutes("", error))
+        if not self.app.realtime_settings.get("llm_summary_enabled", False):
+            messagebox.showinfo(self.window.title(), "Enable local LLM summaries in System Settings first.")
             return
-
-        with contextlib.suppress(Exception):
-            self.root.after(0, lambda result=minutes: self.finish_generate_minutes(result, None))
+        target = (output_directory() / f"{self.offline_file_stem}_offline_{dt.datetime.now():%H%M%S_%f}.txt").resolve()
+        target.write_text(transcript, encoding="utf-8")
+        self.queued_summary_path = target
+        self.app.queue_background_summary(target, transcript, f"{self.offline_file_stem}_offline")
+        self.set_status("Minutes queued. See Summary Queue for progress.")
+        self.app.show_main_tab("queue")
 
     def finish_generate_minutes(self, minutes: str, error: Optional[Exception]) -> None:
         if self.closed:
@@ -2498,10 +2503,10 @@ class OfflineTranscriptWindow:
 
 
 class SystemSettingsWindow:
-    def __init__(self, root: tk.Tk, app: "MeetingRecorderApp") -> None:
+    def __init__(self, root: tk.Tk, app: "MeetingRecorderApp", parent=None) -> None:
         self.root = root
         self.app = app
-        self.window = tk.Toplevel(root)
+        self.window = EmbeddedPanel(parent, app, "settings") if parent is not None else tk.Toplevel(root)
         self.window.title(app.t("system_settings"))
         self.window.geometry("640x720")
         self.window.minsize(560, 620)
@@ -2592,6 +2597,10 @@ class SystemSettingsWindow:
             "capture_read_seconds": tk.DoubleVar(),
             "capture_block_seconds": tk.DoubleVar(),
             "auto_screenshot_interval_seconds": tk.DoubleVar(),
+            "meeting_end_reminder_enabled": tk.BooleanVar(),
+            "meeting_end_silence_seconds": tk.DoubleVar(),
+            "meeting_end_microphone_release_seconds": tk.DoubleVar(),
+            "meeting_end_reminder_seconds": tk.DoubleVar(),
         }
         row = 0
         for key, label in (
@@ -2604,13 +2613,17 @@ class SystemSettingsWindow:
             self._entry(parent, label, self.common_vars[key], row)
             row += 1
 
-        ttk.Checkbutton(parent, text="VAD", variable=self.common_vars["vad_filter"]).grid(
+        SelectableCheckbutton(parent, text="VAD", variable=self.common_vars["vad_filter"]).grid(
             row=row,
             column=0,
             columnspan=2,
             sticky="w",
             pady=(10, 0),
         )
+        row += 1
+        SelectableCheckbutton(parent, text="Meeting end reminder / 会议结束提醒",
+                              variable=self.common_vars["meeting_end_reminder_enabled"]).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(10, 0))
         row += 1
         for key, label in (
             ("vad_min_silence_duration_ms", "VAD min silence ms"),
@@ -2620,6 +2633,9 @@ class SystemSettingsWindow:
             ("capture_read_seconds", "Capture read seconds"),
             ("capture_block_seconds", "Capture block seconds"),
             ("auto_screenshot_interval_seconds", "Auto screenshot interval sec"),
+            ("meeting_end_silence_seconds", "No speech reminder sec"),
+            ("meeting_end_microphone_release_seconds", "Mic released + no speech sec"),
+            ("meeting_end_reminder_seconds", "Reminder snooze sec"),
         ):
             self._entry(parent, label, self.common_vars[key], row)
             row += 1
@@ -2651,19 +2667,19 @@ class SystemSettingsWindow:
             "llm_resume_idle_seconds": tk.DoubleVar(),
         }
         row = 0
-        ttk.Checkbutton(
+        SelectableCheckbutton(
             parent,
             text="Use local LLM for final meeting summary",
             variable=self.summary_vars["llm_summary_enabled"],
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
         row += 1
-        ttk.Checkbutton(
+        SelectableCheckbutton(
             parent,
             text="Managed llama server",
             variable=self.summary_vars["llm_server_managed"],
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
         row += 1
-        ttk.Label(parent, text="LLM model preset").grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
+        SelectableLabel(parent, text="LLM model preset").grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
         llm_preset_values = [CUSTOM_MODEL_PRESET_LABEL] + [preset["label"] for preset in LLM_MODEL_PRESETS]
         llm_combo = ttk.Combobox(
             parent,
@@ -2689,7 +2705,7 @@ class SystemSettingsWindow:
             maximum=100.0,
             variable=self.llm_download_progress_var,
         ).grid(row=0, column=1, sticky="ew")
-        ttk.Label(llm_tools, textvariable=self.llm_download_status_var, wraplength=420).grid(
+        SelectableLabel(llm_tools, textvariable=self.llm_download_status_var, wraplength=420).grid(
             row=1,
             column=0,
             columnspan=2,
@@ -2722,7 +2738,7 @@ class SystemSettingsWindow:
             self._entry(parent, label, self.summary_vars[key], row)
             row += 1
 
-        ttk.Label(parent, text="Summary prompt templates").grid(
+        SelectableLabel(parent, text="Summary prompt templates").grid(
             row=row,
             column=0,
             columnspan=2,
@@ -2751,7 +2767,7 @@ class SystemSettingsWindow:
             self.summary_prompt_widgets[key] = text
         row += 1
 
-        ttk.Label(
+        SelectableLabel(
             parent,
             text=(
                 "Start llama.cpp or Ollama first. Live rolling minutes still use the lightweight "
@@ -2776,7 +2792,7 @@ class SystemSettingsWindow:
         }
         self.language_vars[language] = vars_for_language
         row = 0
-        ttk.Label(parent, text="Model preset").grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
+        SelectableLabel(parent, text="Model preset").grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
         preset_values = [CUSTOM_MODEL_PRESET_LABEL] + [preset["label"] for preset in whisper_presets(language)]
         preset_combo = ttk.Combobox(
             parent,
@@ -2806,7 +2822,7 @@ class SystemSettingsWindow:
             maximum=100.0,
             variable=self.model_download_progress_vars[language],
         ).grid(row=0, column=1, sticky="ew")
-        ttk.Label(model_tools, textvariable=self.model_download_status_vars[language], wraplength=420).grid(
+        SelectableLabel(model_tools, textvariable=self.model_download_status_vars[language], wraplength=420).grid(
             row=1,
             column=0,
             columnspan=2,
@@ -2826,20 +2842,20 @@ class SystemSettingsWindow:
             self._entry(parent, label, vars_for_language[key], row)
             row += 1
 
-        ttk.Checkbutton(
+        SelectableCheckbutton(
             parent,
             text="Condition on previous text",
             variable=vars_for_language["condition_on_previous_text"],
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(10, 0))
         row += 1
-        ttk.Checkbutton(
+        SelectableCheckbutton(
             parent,
             text="Simplified Chinese",
             variable=vars_for_language["simplify_chinese"],
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
         row += 1
 
-        ttk.Label(parent, text="Base initial prompt").grid(row=row, column=0, columnspan=2, sticky="w", pady=(14, 4))
+        SelectableLabel(parent, text="Base initial prompt").grid(row=row, column=0, columnspan=2, sticky="w", pady=(14, 4))
         row += 1
         prompt = tk.Text(parent, height=12, wrap=tk.WORD, font=("Microsoft YaHei UI", 10))
         prompt.grid(row=row, column=0, columnspan=2, sticky="nsew")
@@ -2847,7 +2863,7 @@ class SystemSettingsWindow:
         self.prompt_widgets[language] = prompt
 
     def _entry(self, parent: ttk.Frame, label: str, variable: tk.Variable, row: int) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
+        SelectableLabel(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
         ttk.Entry(parent, textvariable=variable, width=28).grid(row=row, column=1, sticky="w", pady=(8, 0))
 
     def model_preset_by_label(self, language: str, label: str) -> Optional[dict[str, str]]:
@@ -3001,6 +3017,7 @@ class SystemSettingsWindow:
                 )
             self.root.after(0, lambda lang=language, path=target_dir: self.finish_model_download(lang, path, None))
         except Exception as exc:
+            logging.exception("Model download failed: %s", repo_id)
             self.root.after(0, lambda lang=language, path=target_dir, error=exc: self.finish_model_download(lang, path, error))
 
     def infer_llm_preset(self, settings: dict[str, Any]) -> Optional[dict[str, str]]:
@@ -3110,6 +3127,7 @@ class SystemSettingsWindow:
             local_path = Path(hf_hub_download(repo_id=repo_id, filename=filename, local_dir=str(target_dir)))
             self.root.after(0, lambda path=local_path: self.finish_llm_model_download(path, None))
         except Exception as exc:
+            logging.exception("LLM model download failed: %s", preset["repo_id"])
             self.root.after(0, lambda error=exc: self.finish_llm_model_download(None, error))
 
     def load_values(self, settings: dict[str, Any]) -> None:
@@ -3201,6 +3219,9 @@ class SystemSettingsWindow:
             messagebox.showerror(self.window.title(), f"{self.app.t('save_failed')}\n{exc}")
 
     def close(self) -> None:
+        if isinstance(self.window, EmbeddedPanel):
+            self.app.show_main_tab("recording")
+            return
         self.app.system_settings_window = None
         self.window.destroy()
 
@@ -3208,6 +3229,8 @@ class SystemSettingsWindow:
 class MeetingRecorderApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        self.mousewheel_router = MouseWheelRouter(root)
+        self.copy_text_router = CopyTextRouter(root)
         self.root.withdraw()
 
         self.state = "idle"
@@ -3250,6 +3273,9 @@ class MeetingRecorderApp:
         self.emergency_stop_lock = threading.Lock()
         self.emergency_stop_started = False
         self.summary_jobs: "queue.Queue[Optional[SummaryJob]]" = queue.Queue()
+        self.main_notebook = None
+        self.main_tabs = {}
+        self.summary_store = SummaryQueueStore(output_directory() / "summary_queue.json")
         self.summary_thread: Optional[threading.Thread] = None
         self.summary_lock = threading.Lock()
         self.llm_process: Optional[subprocess.Popen] = None
@@ -3262,6 +3288,11 @@ class MeetingRecorderApp:
 
         self.icon = pystray.Icon(self.t("app_name"), make_tray_icon(), self.t("app_name"), self.build_menu())
         self.install_windows_power_shutdown_hooks()
+        for record in self.summary_store.snapshot():
+            if record["status"] == "queued":
+                self.summary_jobs.put(self.summary_job_from_record(record))
+        if not self.summary_jobs.empty():
+            self.start_summary_worker()
 
     def install_windows_power_shutdown_hooks(self) -> None:
         if sys.platform != "win32":
@@ -3533,6 +3564,9 @@ class MeetingRecorderApp:
 
     def build_menu(self) -> Menu:
         return Menu(
+            MenuItem("Open", lambda icon, item: self.root.after(0, self.show_main_tab), default=True),
+            MenuItem(lambda item: f"Pending summaries: {self.summary_store.pending_count}",
+                     lambda icon, item: self.root.after(0, lambda: self.show_main_tab("queue"))),
             MenuItem(lambda item: self.record_menu_text, self.tray_record_clicked),
             MenuItem(lambda item: self.t("text_window"), self.tray_text_window_clicked),
             MenuItem(lambda item: self.t("offline_transcript"), self.tray_offline_transcript_clicked),
@@ -3551,6 +3585,53 @@ class MeetingRecorderApp:
         finally:
             with contextlib.suppress(Exception):
                 self.icon.stop()
+
+    def show_main_tab(self, key="recording") -> None:
+        if self.main_notebook is None:
+            self.root.geometry("1120x780")
+            self.root.minsize(900, 600)
+            self.root.protocol("WM_DELETE_WINDOW", self.root.withdraw)
+            self.main_notebook = ttk.Notebook(self.root)
+            self.main_notebook.pack(fill=tk.BOTH, expand=True)
+            for tab_key, label in (("recording", "Recording & Text"), ("queue", "Summary Queue"),
+                                   ("offline", "Offline Transcript"), ("settings", "System Settings"),
+                                   ("screenshot", "Screenshot"), ("about", "About")):
+                panel = ttk.Frame(self.main_notebook)
+                self.main_notebook.add(panel, text=label)
+                self.main_tabs[tab_key] = panel
+            controls = ttk.Frame(self.main_tabs["recording"], padding=12)
+            controls.pack(fill=tk.X)
+            self.record_button = ttk.Button(controls, command=self.toggle_recording)
+            self.record_button.pack(side=tk.LEFT)
+            self.record_status = SelectableLabel(controls)
+            self.record_status.pack(side=tk.LEFT, padx=15)
+            self.transcript_window = TranscriptWindow(self.root, self, self.main_tabs["recording"])
+            self.transcript_window.set_text(self.transcript_text)
+            self.offline_window = OfflineTranscriptWindow(self.root, self, self.main_tabs["offline"])
+            self.system_settings_window = SystemSettingsWindow(self.root, self, self.main_tabs["settings"])
+            self.queue_view = SummaryQueueView(self.main_tabs["queue"], self)
+            screen = ttk.Frame(self.main_tabs["screenshot"], padding=20)
+            screen.pack(fill=tk.BOTH, expand=True)
+            ttk.Button(screen, text="Take screenshot", command=self.take_manual_screenshot).pack(anchor="w", pady=6)
+            self.screenshot_toggle = ttk.Button(screen, command=self.toggle_auto_screenshot)
+            self.screenshot_toggle.pack(anchor="w", pady=6)
+            ttk.Button(screen, text="Open screenshot folder", command=lambda: os.startfile(str(self.ensure_screenshot_dir()))).pack(anchor="w", pady=6)
+            self.screenshot_status = SelectableLabel(screen, wraplength=850)
+            self.screenshot_status.pack(anchor="w", pady=12)
+            self.show_about()
+            self.refresh_main_status()
+        self.main_notebook.select(self.main_tabs[key])
+        self.root.deiconify()
+        self.root.lift()
+
+    def refresh_main_status(self) -> None:
+        if self.shutting_down:
+            return
+        self.record_button.configure(text=self.record_menu_text, state="disabled" if self.state == "stopping" else "normal")
+        self.record_status.configure(text=f"Status: {self.state}")
+        self.screenshot_toggle.configure(text=self.auto_screenshot_menu_text)
+        self.screenshot_status.configure(text=f"Folder: {self.screenshot_dir or self.screenshot_root()}")
+        self.root.after(500, self.refresh_main_status)
 
     def tray_record_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
         self.root.after(0, self.toggle_recording)
@@ -3861,28 +3942,28 @@ class MeetingRecorderApp:
         self.recording_options_language_var = tk.StringVar(value=DEFAULT_TRANSCRIPTION_LANGUAGE)
         self.recording_options_auto_screenshot_var = tk.BooleanVar(value=self.auto_screenshot_enabled)
 
-        ttk.Label(frame, text=self.t("transcription_language")).pack(anchor=tk.W)
-        ttk.Radiobutton(
+        SelectableLabel(frame, text=self.t("transcription_language")).pack(anchor=tk.W)
+        SelectableRadiobutton(
             frame,
             text=self.t("transcription_language_english"),
             variable=self.recording_options_language_var,
             value="en",
             command=self.refresh_recording_prompt_text,
         ).pack(anchor=tk.W, pady=(6, 0))
-        ttk.Radiobutton(
+        SelectableRadiobutton(
             frame,
             text=self.t("transcription_language_chinese"),
             variable=self.recording_options_language_var,
             value="zh",
             command=self.refresh_recording_prompt_text,
         ).pack(anchor=tk.W, pady=(4, 0))
-        ttk.Checkbutton(
+        SelectableCheckbutton(
             frame,
             text=self.t("auto_screenshot_option"),
             variable=self.recording_options_auto_screenshot_var,
         ).pack(anchor=tk.W, pady=(14, 0))
 
-        ttk.Label(frame, text=self.t("recognition_prompt")).pack(anchor=tk.W, pady=(14, 4))
+        SelectableLabel(frame, text=self.t("recognition_prompt")).pack(anchor=tk.W, pady=(14, 4))
         self.recording_options_prompt_text = tk.Text(frame, height=8, wrap=tk.WORD, font=("Microsoft YaHei UI", 10))
         self.recording_options_prompt_text.pack(fill=tk.BOTH, expand=True)
         self.refresh_recording_prompt_text()
@@ -4074,6 +4155,15 @@ class MeetingRecorderApp:
                 daemon=True,
         )
         session.recorder_thread.start()
+        if session.realtime_settings.get("meeting_end_reminder_enabled", True):
+            settings = session.realtime_settings
+            session.meeting_end_policy = MeetingEndPolicy(
+                time.monotonic(),
+                silence_seconds=max(30, float(settings.get("meeting_end_silence_seconds", 180))),
+                microphone_release_seconds=max(30, float(settings.get("meeting_end_microphone_release_seconds", 60))),
+                reminder_seconds=max(30, float(settings.get("meeting_end_reminder_seconds", 600))),
+            )
+            threading.Thread(target=self.meeting_end_monitor, args=(session,), name="meeting-end-monitor", daemon=True).start()
         session.writer_thread.start()
         if session.transcription_preparer_thread is not None:
             session.transcription_preparer_thread.start()
@@ -4088,6 +4178,72 @@ class MeetingRecorderApp:
 
     def stop_recording(self) -> None:
         self.request_stop_recording(auto_save=True, emergency=False, reason="")
+
+    def meeting_end_monitor(self, session: RecordingSession) -> None:
+        lower_current_thread_priority()
+        policy = session.meeting_end_policy
+        try:
+            from faster_whisper.vad import get_speech_timestamps, VadOptions
+            options = VadOptions(min_speech_duration_ms=100, min_silence_duration_ms=100)
+            next_mic_check = 0.0
+            while not session.stop_event.is_set() and not self.shutting_down:
+                now = time.monotonic()
+                if now >= next_mic_check:
+                    policy.observe_microphone(now, is_microphone_in_use_by_other_app())
+                    next_mic_check = now + 5
+                try:
+                    captured_at, chunks = session.meeting_end_audio_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                speech = any(
+                    bool(get_speech_timestamps(resample_audio(audio, RECORD_SAMPLE_RATE, 16000), vad_options=options))
+                    for audio in chunks.values() if audio.size
+                )
+                policy.observe_audio(captured_at, speech)
+                reason = policy.reason(time.monotonic())
+                if reason:
+                    policy.prompt_open = True
+                    self.root.after(0, lambda detected=reason: self.show_meeting_end_reminder(session, detected))
+        except Exception:
+            logging.exception("meeting-end[%s] reminder monitor unavailable; recording continues", session.file_stem)
+
+    def show_meeting_end_reminder(self, session: RecordingSession, reason: str) -> None:
+        policy = session.meeting_end_policy
+        if self.shutting_down or self.session is not session or session.stop_event.is_set() or self.state != "recording":
+            policy.prompt_open = False
+            return
+        policy.prompt_open = False
+        current_reason = policy.reason(time.monotonic())
+        if not current_reason or session.meeting_end_dialog is not None:
+            return
+        policy.prompt_open = True
+        dialog = tk.Toplevel(self.root)
+        session.meeting_end_dialog = dialog
+        dialog.title("Meeting end reminder / 会议结束提醒")
+        dialog.resizable(False, False)
+        frame = ttk.Frame(dialog, padding=20)
+        frame.pack(fill="both", expand=True)
+        explanation = ("持续未检测到人声。 / No speech detected for a while." if current_reason == "silence"
+                       else "其他软件已停止使用麦克风，且持续无人声。 / Microphone released and no speech detected.")
+        SelectableLabel(frame, text=f"{explanation}\n\n会议可能已结束，是否停止录音和转录并保存？\nThe meeting may have ended. Stop recording and transcription, and save?", wraplength=500).pack(fill="x")
+
+        def choose(action):
+            session.meeting_end_dialog = None
+            policy.snooze(time.monotonic(), 600 if action == "later" else None)
+            dialog.destroy()
+            if action == "stop" and self.session is session and not session.stop_event.is_set():
+                self.stop_recording()
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(18, 0))
+        ttk.Button(buttons, text="停止并保存 / Stop & save", command=lambda: choose("stop")).pack(side="left", padx=4)
+        ttk.Button(buttons, text="继续录制 / Continue", command=lambda: choose("continue")).pack(side="left", padx=4)
+        ttk.Button(buttons, text="10 分钟后再提醒 / Remind in 10 min", command=lambda: choose("later")).pack(side="left", padx=4)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("continue"))
+        dialog.lift()
+        dialog.attributes("-topmost", True)
+        self.root.after(1000, lambda: dialog.winfo_exists() and dialog.attributes("-topmost", False))
+        logging.info("meeting-end[%s] reminder displayed: %s", session.file_stem, current_reason)
 
     def request_stop_recording(
         self,
@@ -4124,6 +4280,10 @@ class MeetingRecorderApp:
         else:
             self.set_auto_screenshot_enabled(False)
         session.stop_event.set()
+        if session.meeting_end_dialog is not None:
+            with contextlib.suppress(tk.TclError):
+                session.meeting_end_dialog.destroy()
+            session.meeting_end_dialog = None
         session.active_event.set()
         if emergency:
             with contextlib.suppress(queue.Full):
@@ -4136,6 +4296,12 @@ class MeetingRecorderApp:
             self.state = "stopping"
         self.update_tray_menu()
         logging.info("stop[%s] state set to stopping", session.file_stem)
+
+        if not emergency and not self.shutting_down:
+            try:
+                self.register_pending_transcript(session)
+            except Exception:
+                logging.exception("summary[%s] could not register pending transcription", session.file_stem)
 
         if emergency:
             self.finish_stop_worker(session, emergency=True, direct_complete=True)
@@ -4246,6 +4412,10 @@ class MeetingRecorderApp:
             logging.info("stop[%s] dropping captured chunk because stop was requested", session.file_stem)
             return
         chunks = filter_microphone_bleed(chunks)
+        if session.meeting_end_policy is not None:
+            sample = (time.monotonic(), chunks)
+            with contextlib.suppress(queue.Full):
+                session.meeting_end_audio_queue.put_nowait(sample)
         if not chunks:
             return
         if session.stop_event.is_set():
@@ -5146,6 +5316,10 @@ class MeetingRecorderApp:
             self.save_session_to_output(session, queue_summary=queue_summary)
         except Exception:
             logging.exception("stop[%s] background transcription finish failed", session.file_stem)
+            identity = getattr(session, "summary_job_identity", None)
+            if identity:
+                self.summary_store.update(identity, status="failed", detail="Transcription could not finish. Re-import the audio in Offline Transcript.")
+                self.update_tray_menu()
 
     def mark_recording_idle_after_stop(self, session: RecordingSession) -> None:
         if self.session is not session:
@@ -5235,6 +5409,8 @@ class MeetingRecorderApp:
         cancel_check: Optional[Callable[[], bool]] = None,
         pause_wait: Optional[Callable[[], None]] = None,
         debug_name: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        completed_chunks: Optional[list[str]] = None,
     ) -> str:
         settings = settings or self.realtime_settings
         if not bool(settings.get("llm_summary_enabled", False)):
@@ -5307,12 +5483,18 @@ class MeetingRecorderApp:
             return ""
 
         if len(chunks) == 1:
+            if progress_callback:
+                progress_callback(0, 1, "Generating meeting minutes")
             prompt = self.local_llm_summary_prompt(chunks[0], full_prompt_template)
             text = call_prompt(prompt, max_output_tokens)
         else:
-            chunk_summaries: list[str] = []
+            chunk_summaries = completed_chunks if completed_chunks is not None else []
             chunk_token_budget = max(256, min(max_output_tokens, 600))
             for index, chunk in enumerate(chunks, start=1):
+                if index <= len(chunk_summaries):
+                    continue
+                if progress_callback:
+                    progress_callback(index - 1, len(chunks) + 1, f"Summarizing section {index}/{len(chunks)}")
                 prompt = self.local_llm_chunk_summary_prompt(chunk, index, len(chunks), chunk_prompt_template)
                 logging.info("summary chunk request %d/%d chars=%d", index, len(chunks), len(chunk))
                 chunk_summary = call_prompt(prompt, chunk_token_budget)
@@ -5320,17 +5502,23 @@ class MeetingRecorderApp:
                     logging.info("summary chunk request %d/%d returned no text", index, len(chunks))
                     return ""
                 chunk_summaries.append(f"Chunk {index}:\n{chunk_summary}")
+                if progress_callback:
+                    progress_callback(index, len(chunks) + 1, f"Completed section {index}/{len(chunks)}")
 
             merged_input = "\n\n".join(chunk_summaries)
             untrimmed_merged_input = merged_input
             merged_input = self.trim_transcript_for_summary(merged_input, merge_max_chars)
             logging.info("summary merge request chars=%d", len(merged_input))
             prompt = self.local_llm_merge_summary_prompt(merged_input, merge_prompt_template)
+            if progress_callback:
+                progress_callback(len(chunks), len(chunks) + 1, "Merging final meeting minutes")
             text = call_prompt(prompt, max_output_tokens)
         if not text:
             logging.info("summary build returned no text")
             return ""
         text = self.sanitize_llm_summary(text, cleaned_transcript)
+        if progress_callback:
+            progress_callback(1, 1, "Saving meeting minutes")
         if len(chunks) > 1:
             self.write_summary_debug_file(
                 debug_name,
@@ -5367,8 +5555,9 @@ class MeetingRecorderApp:
     ) -> str:
         settings = settings or self.realtime_settings
         if bool(settings.get("llm_server_managed", True)) and not self.ensure_managed_llm_server(settings):
-            logging.info("summary request skipped: managed LLM server unavailable")
-            return ""
+            if self.shutting_down:
+                return ""
+            raise RuntimeError("Local model server could not start or did not become ready before the startup timeout. Check the model path and server settings.")
 
         result_queue: "queue.Queue[tuple[str, object]]" = queue.Queue(maxsize=1)
         logging.info(
@@ -5425,7 +5614,7 @@ class MeetingRecorderApp:
                 if cancel_check is not None and cancel_check():
                     logging.info("summary request paused/cancelled due to resource policy")
                     self.stop_managed_llm_server()
-                    raise SummaryPaused()
+                    raise SummaryPaused(getattr(self, "summary_pause_reason", "Waiting for resources"))
         else:
             try:
                 status, value = result_queue.get_nowait()
@@ -5435,7 +5624,7 @@ class MeetingRecorderApp:
 
         if status != "ok":
             logging.info("summary request failed: %s", value)
-            return ""
+            raise RuntimeError(f"Model request failed: {value}") from (value if isinstance(value, Exception) else None)
         data = value
 
         text = self.extract_local_llm_text(data)
@@ -5872,17 +6061,69 @@ class MeetingRecorderApp:
             self.queue_background_summary(text_target, transcript, session.file_stem)
         return mp3_target, text_target
 
+    def register_pending_transcript(self, session: RecordingSession) -> None:
+        settings = copy.deepcopy(self.realtime_settings)
+        if not settings.get("llm_summary_enabled", False):
+            return
+        path = (session.text_final_path or (output_directory() / f"{session.file_stem}.txt")).resolve()
+        with session.transcript_lock:
+            transcript = self.transcript_without_existing_minutes(session.transcript_text).strip()
+        record, _ = self.summary_store.add(path, transcript, session.file_stem, settings, awaiting_transcript=True)
+        session.summary_job_identity = record["id"]
+        logging.info("summary[%s] registered: waiting for final transcription", session.file_stem)
+        self.update_tray_menu()
+
     def queue_background_summary(self, text_path: Path, transcript: str, file_stem: str) -> None:
         settings = copy.deepcopy(self.realtime_settings)
+        cleaned = self.transcript_without_existing_minutes(transcript).strip()
+        record = self.summary_store.finish_transcript(text_path.resolve(), cleaned)
+        if record is not None:
+            self.update_tray_menu()
+            if record["status"] == "queued":
+                self.summary_jobs.put(self.summary_job_from_record(record))
+                self.start_summary_worker()
+            return
         if not bool(settings.get("llm_summary_enabled", False)):
             logging.info("summary[%s] not queued: local LLM summary disabled", file_stem)
             return
-        cleaned = self.transcript_without_existing_minutes(transcript).strip()
         if not cleaned:
             logging.info("summary[%s] not queued: empty transcript", file_stem)
             return
         logging.info("summary[%s] queued text_path=%s transcript_chars=%d", file_stem, text_path, len(cleaned))
-        self.summary_jobs.put(SummaryJob(text_path, cleaned, file_stem, settings))
+        record, added = self.summary_store.add(text_path.resolve(), cleaned, file_stem, settings)
+        if not added:
+            return
+        self.summary_jobs.put(self.summary_job_from_record(record))
+        self.update_tray_menu()
+        self.start_summary_worker()
+
+    def summary_job_from_record(self, record: dict) -> SummaryJob:
+        return SummaryJob(Path(record["text_path"]), record["transcript"], record["file_stem"],
+                          record["settings"], record["id"], record.get("chunks", []))
+
+    def update_summary_job(self, job: SummaryJob, **values) -> None:
+        self.summary_store.update(job.identity, **values)
+        self.update_tray_menu()
+
+    def retry_summary(self, identity: str) -> None:
+        record = next(r for r in self.summary_store.snapshot() if r["id"] == identity)
+        if record["status"] != "failed":
+            return
+        if record.get("awaiting_transcript"):
+            messagebox.showinfo(self.title(), "Transcription did not finish. Re-import the recording in Offline Transcript before generating minutes.")
+            return
+        settings = copy.deepcopy(self.realtime_settings)
+        if not settings.get("llm_summary_enabled", False):
+            messagebox.showinfo(self.title(), "Enable local LLM summaries in System Settings first.")
+            return
+        if settings != record["settings"]:
+            record.update(settings=settings, chunks=[], progress=0)
+            self.summary_store.update(identity, settings=settings, chunks=[], progress=0)
+        self.summary_store.update(identity, status="queued", detail="Waiting for resources")
+        self.summary_jobs.put(self.summary_job_from_record(record))
+        self.start_summary_worker()
+
+    def start_summary_worker(self) -> None:
         with self.summary_lock:
             if self.summary_thread is None or not self.summary_thread.is_alive():
                 self.summary_thread = threading.Thread(
@@ -5911,7 +6152,13 @@ class MeetingRecorderApp:
                 self.stop_managed_llm_server()
                 logging.info("summary worker exiting: stop sentinel")
                 return
-            self.run_background_summary_job(job)
+            try:
+                self.run_background_summary_job(job)
+            except Exception as exc:
+                logging.exception("summary queue job failed: %s", job.file_stem)
+                self.update_summary_job(job, status="failed", detail=str(exc))
+            finally:
+                self.stop_managed_llm_server()
 
     def run_background_summary_job(self, job: SummaryJob) -> None:
         if not bool(job.settings.get("llm_summary_enabled", False)):
@@ -5920,7 +6167,7 @@ class MeetingRecorderApp:
 
         logging.info("summary[%s] started", job.file_stem)
         while not self.shutting_down:
-            self.wait_for_summary_resources(job.settings)
+            self.wait_for_summary_job(job)
             if self.shutting_down:
                 logging.info("summary[%s] cancelled: app shutting down", job.file_stem)
                 return
@@ -5929,21 +6176,54 @@ class MeetingRecorderApp:
                     job.transcript,
                     settings=job.settings,
                     cancel_check=lambda settings=job.settings: self.summary_should_pause(settings, during_llm=True),
-                    pause_wait=lambda settings=job.settings: self.wait_for_summary_resources(settings),
+                    pause_wait=lambda: self.wait_for_summary_job(job),
                     debug_name=job.file_stem,
+                    progress_callback=lambda done, total, detail: self.update_summary_job(
+                        job, status="running", progress=min(99, 100 * done / total), detail=detail, chunks=job.chunks),
+                    completed_chunks=job.chunks,
                 )
             except SummaryPaused:
                 logging.info("summary[%s] paused by resource policy", job.file_stem)
                 continue
             if summary:
                 if self.write_background_summary(job, summary):
+                    self.update_summary_job(job, status="completed", progress=100, detail="Minutes saved")
+                    self.root.after(0, lambda: self.deliver_offline_summary(job, summary))
                     logging.info("summary[%s] written", job.file_stem)
                 else:
+                    self.update_summary_job(job, status="failed", detail="Could not save minutes; click Retry")
                     logging.info("summary[%s] not written; user notification queued", job.file_stem)
                 self.stop_managed_llm_server()
                 return
-            logging.info("summary[%s] produced no summary; waiting before retry", job.file_stem)
-            self.wait_for_summary_resources(job.settings)
+            if not self.shutting_down:
+                self.update_summary_job(job, status="failed", detail="Model returned no summary; check model settings and Retry")
+            return
+
+    def wait_for_summary_job(self, job: SummaryJob) -> None:
+        waited = False
+        while not self.shutting_down and self.summary_should_pause(job.settings):
+            waited = True
+            self.stop_managed_llm_server()
+            interval = 2
+            next_check = dt.datetime.now().astimezone() + dt.timedelta(seconds=interval)
+            reason = getattr(self, "summary_pause_reason", "Waiting for resources / recording to finish")
+            self.update_summary_job(
+                job, status="waiting",
+                detail=f"{reason} | 下次核查 / Next check: {next_check:%H:%M:%S} ({interval}s)",
+                next_check_at=next_check.isoformat(),
+            )
+            time.sleep(interval)
+        if waited and not self.shutting_down:
+            self.update_summary_job(job, status="running", detail="Resuming current section", next_check_at=None)
+
+    def deliver_offline_summary(self, job: SummaryJob, summary: str) -> None:
+        window = self.offline_window
+        if window is not None and getattr(window, "queued_summary_path", None) == job.text_path:
+            current = self.transcript_without_existing_minutes(window.text.get("1.0", tk.END)).strip()
+            if current == job.transcript and not window.is_transcribing():
+                window.finish_generate_minutes(summary, None)
+            else:
+                window.set_status(f"Minutes saved: {job.text_path.name}")
 
     def write_background_summary(self, job: SummaryJob, summary: str) -> bool:
         try:
@@ -5973,10 +6253,19 @@ class MeetingRecorderApp:
     def summary_should_pause(self, settings: dict[str, Any], during_llm: bool = False) -> bool:
         with self.state_lock:
             if self.state != "idle":
+                self.summary_pause_reason = "Waiting for recording to stop"
                 self.summary_last_busy_at = time.monotonic()
                 return True
 
+        if (self.offline_window is not None and self.offline_window.is_transcribing()) or any(
+            child.name in {"whisper-transcriber", "offline-whisper-transcriber"} for child in mp.active_children()
+        ):
+            self.summary_pause_reason = "Waiting for transcription to finish"
+            self.summary_last_busy_at = time.monotonic()
+            return True
+
         if is_microphone_in_use_by_other_app():
+            self.summary_pause_reason = "Waiting: another application is using the microphone"
             self.summary_last_busy_at = time.monotonic()
             return True
 
@@ -5987,17 +6276,25 @@ class MeetingRecorderApp:
         cpu_percent = self.system_cpu_percent()
         memory_percent, available_mb = self.system_memory_status()
         if not during_llm and cpu_percent >= cpu_limit:
+            self.summary_pause_reason = f"Waiting for CPU: {cpu_percent:.0f}% (limit {cpu_limit:.0f}%)"
             self.summary_last_busy_at = time.monotonic()
             return True
         if memory_percent >= memory_limit:
+            self.summary_pause_reason = f"Waiting for memory usage: {memory_percent:.0f}% (limit {memory_limit:.0f}%)"
             self.summary_last_busy_at = time.monotonic()
             return True
         if available_mb and available_mb <= available_limit:
+            self.summary_pause_reason = f"Waiting for available memory: {available_mb:.0f} MB (need more than {available_limit:.0f} MB)"
             self.summary_last_busy_at = time.monotonic()
             return True
 
         resume_seconds = max(0.0, float(settings.get("llm_resume_idle_seconds", 30.0)))
-        return time.monotonic() - self.summary_last_busy_at < resume_seconds
+        remaining = resume_seconds - (time.monotonic() - self.summary_last_busy_at)
+        if remaining > 0:
+            self.summary_pause_reason = f"Waiting for stable resources: {remaining:.0f}s remaining"
+            return True
+        self.summary_pause_reason = ""
+        return False
 
     def system_cpu_percent(self) -> float:
         if sys.platform != "win32":
@@ -6151,7 +6448,8 @@ class MeetingRecorderApp:
         while time.monotonic() < deadline and not self.shutting_down:
             if self.summary_should_pause(settings, during_llm=True):
                 logging.info("summary managed LLM startup paused by resource policy")
-                return False
+                self.stop_managed_llm_server()
+                raise SummaryPaused(getattr(self, "summary_pause_reason", "Waiting for resources"))
             if self.llm_health_ok(settings):
                 logging.info("summary managed LLM healthy")
                 return True
@@ -6228,48 +6526,24 @@ class MeetingRecorderApp:
             self.transcript_window.set_text(text)
 
     def open_transcript_window(self) -> None:
-        if self.transcript_window is None:
-            self.transcript_window = TranscriptWindow(self.root, self)
-        else:
-            self.transcript_window.window.deiconify()
-            self.transcript_window.window.lift()
-
-        with self.state_lock:
-            state = self.state
-        if state == "idle":
-            self.transcript_window.set_text("")
-        else:
-            with self.transcript_lock:
-                transcript = self.transcript_text
-            self.transcript_window.set_text(transcript)
+        self.show_main_tab("recording")
 
     def open_offline_transcript_window(self) -> None:
-        with self.state_lock:
-            state = self.state
-        if state != "idle":
-            messagebox.showinfo(self.title(), self.t("offline_live_busy"))
-            return
-
-        if self.offline_window is None:
-            self.offline_window = OfflineTranscriptWindow(self.root, self)
-        else:
-            self.offline_window.window.deiconify()
-            self.offline_window.window.lift()
+        self.show_main_tab("offline")
 
     def open_system_settings_window(self) -> None:
-        if self.system_settings_window is None:
-            self.system_settings_window = SystemSettingsWindow(self.root, self)
-        else:
-            self.system_settings_window.window.deiconify()
-            self.system_settings_window.window.lift()
+        self.show_main_tab("settings")
 
     def show_about(self) -> None:
+        if self.main_notebook is None:
+            self.show_main_tab("about")
+            return
         if self.about_window is not None and self.about_window.winfo_exists():
             self.about_window.deiconify()
             self.about_window.lift()
             return
 
-        self.about_window = tk.Toplevel(self.root)
+        self.about_window = EmbeddedPanel(self.main_tabs["about"], self, "about")
         self.about_window.geometry("380x220")
         self.about_window.resizable(False, False)
         self.about_window.protocol("WM_DELETE_WINDOW", self.close_about_window)
@@ -6277,17 +6551,17 @@ class MeetingRecorderApp:
         frame = ttk.Frame(self.about_window, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        self.about_body_label = ttk.Label(frame, wraplength=330, justify=tk.LEFT)
+        self.about_body_label = SelectableLabel(frame, wraplength=330, justify=tk.LEFT)
         self.about_body_label.pack(anchor=tk.W, fill=tk.X)
 
-        self.about_version_label = ttk.Label(frame)
+        self.about_version_label = SelectableLabel(frame)
         self.about_version_label.pack(anchor=tk.W, pady=(8, 0))
 
-        self.about_language_label = ttk.Label(frame)
+        self.about_language_label = SelectableLabel(frame)
         self.about_language_label.pack(anchor=tk.W, pady=(18, 6))
 
         self.about_language_var = tk.StringVar(value=self.language)
-        self.about_english_check = ttk.Checkbutton(
+        self.about_english_check = SelectableCheckbutton(
             frame,
             variable=self.about_language_var,
             onvalue="en",
@@ -6296,7 +6570,7 @@ class MeetingRecorderApp:
         )
         self.about_english_check.pack(anchor=tk.W)
 
-        self.about_chinese_check = ttk.Checkbutton(
+        self.about_chinese_check = SelectableCheckbutton(
             frame,
             variable=self.about_language_var,
             onvalue="zh",
@@ -6307,6 +6581,9 @@ class MeetingRecorderApp:
         self.refresh_about_window()
 
     def close_about_window(self) -> None:
+        if isinstance(self.about_window, EmbeddedPanel):
+            self.root.withdraw()
+            return
         if self.about_window is not None:
             self.about_window.destroy()
         self.about_window = None
