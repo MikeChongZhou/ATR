@@ -6,6 +6,8 @@ venv/
 env/
 
 build/
+build-native/
+build-update/
 dist/
 *.spec
 
