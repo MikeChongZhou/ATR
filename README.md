@@ -74,7 +74,7 @@ python main.py
 生成的程序位于：
 
 ```text
-dist\LocalMeetingRecorder.exe
+dist\LocalMeetingRecorder\LocalMeetingRecorder.exe
 ```
 
 ## Whisper 模型
@@ -118,6 +118,8 @@ Summary Queue 显示所有已入队会议的状态和进度，托盘菜单显示
 如果使用 `-c 4096 -np 1` 启动 llama.cpp，建议把 `Chunk chars` 设置在 `5000-7000` 之间；如果使用 `-c 8192`，可以适当提高到 `9000-12000`。
 
 托管模式会根据 Summary 设置自动启动 llama。Summary 页可以选择 LLM model preset；如果选择的模型本地尚未下载，可以点击 `Download LLM model` 下载到程序或 exe 同级目录的 `models\llm` 目录。下载完成后程序优先用本地 GGUF 文件启动；如果没有本地文件，则用 `llama -hf` 按模型引用启动。
+
+`Managed llama server (auto setup)` 默认开启。需要生成纪要时，如果程序目录和 PATH 中都没有 llama 服务，会自动从 llama.cpp 官方 GitHub 发布下载适合 Windows 架构的 CPU 运行包，校验官方 SHA256 后安装到 exe 同级的 `llm` 目录。下载、校验和加载状态显示在 Summary Queue 中；下载失败可点击 Retry 重试。模型仍通过 `Download LLM model` 单独选择和下载。显式配置的服务程序或模型路径失效时会显示具体路径错误；清空服务程序路径可恢复自动安装。服务输出保存在 exe 同级的 `llama_server.log`，服务提前退出与启动超时会显示不同的诊断信息。
 
 ```text
 Managed llama server: on

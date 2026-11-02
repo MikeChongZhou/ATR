@@ -38,11 +38,12 @@ from tkinter import filedialog, messagebox, ttk
 from transcriber_worker import run_transcriber_process
 from summary_queue import SummaryQueueStore
 from meeting_end import MeetingEndPolicy
+from llama_runtime import ensure_runtime, find_runtime, SetupCancelled
 from desktop_ui import (EmbeddedPanel, SummaryQueueView, MouseWheelRouter, CopyTextRouter, SelectableLabel, SelectableCheckbutton, SelectableRadiobutton, selectable_label_frame)
 
 
 APP_NAME = "Local Meeting Recorder"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -2675,7 +2676,7 @@ class SystemSettingsWindow:
         row += 1
         SelectableCheckbutton(
             parent,
-            text="Managed llama server",
+            text="Managed llama server (auto setup)",
             variable=self.summary_vars["llm_server_managed"],
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
         row += 1
@@ -2770,8 +2771,9 @@ class SystemSettingsWindow:
         SelectableLabel(
             parent,
             text=(
-                "Start llama.cpp or Ollama first. Live rolling minutes still use the lightweight "
-                "local rules so recording stays stable."
+                "Managed mode starts the local server automatically and downloads the official llama runtime if missing. "
+                "Download a model above. Setup progress appears in Summary Queue. "
+                "With managed mode off, start your own llama.cpp or Ollama server."
             ),
             wraplength=460,
             justify=tk.LEFT,
@@ -6153,11 +6155,13 @@ class MeetingRecorderApp:
                 logging.info("summary worker exiting: stop sentinel")
                 return
             try:
+                self.active_summary_job = job
                 self.run_background_summary_job(job)
             except Exception as exc:
                 logging.exception("summary queue job failed: %s", job.file_stem)
                 self.update_summary_job(job, status="failed", detail=str(exc))
             finally:
+                self.active_summary_job = None
                 self.stop_managed_llm_server()
 
     def run_background_summary_job(self, job: SummaryJob) -> None:
@@ -6371,18 +6375,22 @@ class MeetingRecorderApp:
 
     def resolve_llm_executable(self, settings: dict[str, Any]) -> str:
         configured = str(settings.get("llm_server_executable", "") or "").strip()
-        if configured:
-            return configured
-        candidates = (
-            app_directory() / "llm" / "llama.exe",
-            app_directory() / "llm" / "llama-server.exe",
-            app_directory() / "llama.exe",
-            app_directory() / "llama-server.exe",
-        )
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
-        return "llama"
+        return find_runtime(app_directory(), configured) or "llama"
+
+    def report_llm_setup(self, message: str) -> None:
+        logging.info("managed LLM setup: %s", message)
+        job = getattr(self, "active_summary_job", None)
+        if job is not None:
+            self.update_summary_job(job, status="running", detail=message)
+
+    def llm_server_diagnostic(self) -> str:
+        try:
+            with (app_directory() / "llama_server.log").open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 2000))
+                return stream.read().decode("utf-8", errors="replace").strip()[-1200:]
+        except OSError:
+            return "No server log was written."
 
     def llm_health_ok(self, settings: dict[str, Any]) -> bool:
         try:
@@ -6408,8 +6416,36 @@ class MeetingRecorderApp:
             if process is not None and process.poll() is not None:
                 logging.info("summary managed LLM previous process exited code=%s", process.poll())
                 self.llm_process = None
+            needs_runtime = self.llm_process is None
+
+        executable = None
+        if needs_runtime:
+            model_path = str(settings.get("llm_server_model_path", "") or "").strip()
+            model_ref = str(settings.get("llm_server_model_ref", settings.get("llm_summary_model", "")) or "").strip()
+            if model_path and not Path(model_path).is_file():
+                raise RuntimeError(f"Local LLM model file was not found: {model_path}. Select an existing GGUF file or download the model in System Settings > Summary.")
+            if not model_path and not model_ref:
+                raise RuntimeError("No LLM model is configured. Select or download a model in System Settings > Summary.")
+            # Network setup must not hold the process lock used by recording/Exit.
+            try:
+                executable = ensure_runtime(
+                    app_directory(), str(settings.get("llm_server_executable", "") or ""),
+                    progress=self.report_llm_setup,
+                    cancelled=lambda: self.shutting_down or self.summary_should_pause(settings, during_llm=True),
+                )
+            except SetupCancelled:
+                if self.shutting_down:
+                    return False
+                raise SummaryPaused(getattr(self, "summary_pause_reason", "Waiting for resources"))
+            if self.shutting_down:
+                return False
+            if self.summary_should_pause(settings, during_llm=True):
+                raise SummaryPaused(getattr(self, "summary_pause_reason", "Waiting for resources"))
+
+        with self.llm_process_lock:
             if self.llm_process is None:
-                executable = self.resolve_llm_executable(settings)
+                if executable is None:
+                    raise SummaryPaused("Local server was stopped; waiting to restart")
                 model_ref = str(settings.get("llm_server_model_ref", settings.get("llm_summary_model", "")) or "").strip()
                 model_path = str(settings.get("llm_server_model_path", "") or "").strip()
                 host = str(settings.get("llm_server_host", "127.0.0.1") or "127.0.0.1").strip()
@@ -6432,17 +6468,19 @@ class MeetingRecorderApp:
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
                 try:
                     logging.info("summary starting managed LLM: executable=%s model=%s host=%s port=%s context=%s slots=%s", executable, model_source, host, port, context_size, slots)
-                    self.llm_process = subprocess.Popen(
-                        command,
-                        cwd=str(app_directory()),
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=creationflags,
-                    )
-                except Exception:
+                    self.report_llm_setup("正在加载本地模型 / Loading local model")
+                    with (app_directory() / "llama_server.log").open("wb") as server_log:
+                        self.llm_process = subprocess.Popen(
+                            command,
+                            cwd=str(app_directory()),
+                            stdout=server_log,
+                            stderr=subprocess.STDOUT,
+                            creationflags=creationflags,
+                        )
+                except OSError as exc:
                     logging.exception("summary failed to start managed LLM executable=%s", executable)
                     self.llm_process = None
-                    return False
+                    raise RuntimeError(f"Could not launch the local model server: {executable}. {exc}") from exc
 
         deadline = time.monotonic() + max(5.0, float(settings.get("llm_server_start_timeout_seconds", 180.0)))
         while time.monotonic() < deadline and not self.shutting_down:
@@ -6450,12 +6488,20 @@ class MeetingRecorderApp:
                 logging.info("summary managed LLM startup paused by resource policy")
                 self.stop_managed_llm_server()
                 raise SummaryPaused(getattr(self, "summary_pause_reason", "Waiting for resources"))
+            process = self.llm_process
+            if process is not None and process.poll() is not None:
+                exit_code = process.returncode
+                self.llm_process = None
+                raise RuntimeError(f"Local model server exited before it was ready (code {exit_code}). See llama_server.log. {self.llm_server_diagnostic()}")
             if self.llm_health_ok(settings):
                 logging.info("summary managed LLM healthy")
                 return True
             time.sleep(1)
         healthy = self.llm_health_ok(settings)
         logging.info("summary managed LLM startup finished healthy=%s", healthy)
+        if not healthy and not self.shutting_down:
+            self.stop_managed_llm_server()
+            raise RuntimeError("Local model server startup timed out. Check available memory, the GGUF model and startup timeout. See llama_server.log for details. " + self.llm_server_diagnostic())
         return healthy
 
     def stop_managed_llm_server(self) -> None:
