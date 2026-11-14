@@ -3,6 +3,7 @@ from pathlib import Path
 import argparse
 import os
 import plistlib
+import re
 import subprocess
 import sys
 
@@ -36,7 +37,9 @@ def main():
     plist = ROOT / "dist/LocalMeetingRecorder.app/Contents/Info.plist"
     with plist.open("rb") as stream:
         info = plistlib.load(stream)
-    info.update(NSMicrophoneUsageDescription="ATR records your microphone for local meeting transcripts.",
+    version = re.search(r'^APP_VERSION = "([^"]+)"', (ROOT / "main.py").read_text(), re.MULTILINE).group(1)
+    info.update(CFBundleShortVersionString=version, CFBundleVersion=version,
+                NSMicrophoneUsageDescription="ATR records your microphone for local meeting transcripts.",
                 NSScreenCaptureUsageDescription="ATR captures system audio and optional meeting screenshots.",
                 LSMinimumSystemVersion="13.0")
     with plist.open("wb") as stream:
@@ -44,7 +47,10 @@ def main():
     # Updating Info.plist invalidates the generated signature.
     subprocess.run(["codesign", "--force", "--deep", "--sign", "-",
                     str(ROOT / "dist/LocalMeetingRecorder.app")], check=True)
-    print("Built dist/LocalMeetingRecorder.app (local ad-hoc signature).")
+    subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
+                    str(ROOT / "dist/LocalMeetingRecorder.app"),
+                    str(ROOT / "dist/ATR-macOS.zip")], check=True)
+    print("Built dist/LocalMeetingRecorder.app and dist/ATR-macOS.zip (local ad-hoc signature).")
 
 
 if __name__ == "__main__":

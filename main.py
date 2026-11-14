@@ -37,6 +37,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from atr_platform import (data_directory, capture_sources, start_tray,
                           is_microphone_in_use_by_other_app, default_microphone_mode, install_power_hooks)
+from ui_dispatch import UiDispatcher
 from transcriber_worker import run_transcriber_process
 from summary_queue import SummaryQueueStore
 from meeting_end import MeetingEndPolicy
@@ -45,7 +46,7 @@ from desktop_ui import (EmbeddedPanel, SummaryQueueView, MouseWheelRouter, CopyT
 
 
 APP_NAME = "Local Meeting Recorder"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -3187,6 +3188,7 @@ class SystemSettingsWindow:
 class MeetingRecorderApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        self.ui_dispatcher = UiDispatcher(root)
         self.mousewheel_router = MouseWheelRouter(root)
         self.copy_text_router = CopyTextRouter(root)
         self.root.withdraw()
@@ -3522,9 +3524,9 @@ class MeetingRecorderApp:
 
     def build_menu(self) -> Menu:
         return Menu(
-            MenuItem("Open", lambda icon, item: self.root.after(0, self.show_main_tab), default=True),
+            MenuItem("Open", lambda icon, item: self.ui_dispatcher.post(self.show_main_tab), default=True),
             MenuItem(lambda item: f"Pending summaries: {self.summary_store.pending_count}",
-                     lambda icon, item: self.root.after(0, lambda: self.show_main_tab("queue"))),
+                     lambda icon, item: self.ui_dispatcher.post(self.show_main_tab, "queue")),
             MenuItem(lambda item: self.record_menu_text, self.tray_record_clicked),
             MenuItem(lambda item: self.t("text_window"), self.tray_text_window_clicked),
             MenuItem(lambda item: self.t("offline_transcript"), self.tray_offline_transcript_clicked),
@@ -3536,11 +3538,14 @@ class MeetingRecorderApp:
         )
 
     def run(self) -> None:
+        self.ui_dispatcher.start()
         start_tray(self.icon)
-        cleanup_power_hooks = install_power_hooks(self.emergency_stop_and_save)
+        cleanup_power_hooks = install_power_hooks(
+            lambda reason: self.ui_dispatcher.post(self.emergency_stop_and_save, reason))
         try:
             self.root.mainloop()
         finally:
+            self.ui_dispatcher.stop()
             cleanup_power_hooks()
             with contextlib.suppress(Exception):
                 self.icon.stop()
@@ -3593,28 +3598,28 @@ class MeetingRecorderApp:
         self.root.after(500, self.refresh_main_status)
 
     def tray_record_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.toggle_recording)
+        self.ui_dispatcher.post(self.toggle_recording)
 
     def tray_text_window_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.open_transcript_window)
+        self.ui_dispatcher.post(self.open_transcript_window)
 
     def tray_offline_transcript_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.open_offline_transcript_window)
+        self.ui_dispatcher.post(self.open_offline_transcript_window)
 
     def tray_system_settings_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.open_system_settings_window)
+        self.ui_dispatcher.post(self.open_system_settings_window)
 
     def tray_screenshot_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.take_manual_screenshot)
+        self.ui_dispatcher.post(self.take_manual_screenshot)
 
     def tray_auto_screenshot_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.toggle_auto_screenshot)
+        self.ui_dispatcher.post(self.toggle_auto_screenshot)
 
     def tray_about_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.show_about)
+        self.ui_dispatcher.post(self.show_about)
 
     def tray_exit_clicked(self, icon: pystray.Icon, item: MenuItem) -> None:
-        self.root.after(0, self.exit_app)
+        self.ui_dispatcher.post(self.exit_app)
 
     def update_tray_menu(self) -> None:
         with contextlib.suppress(Exception):

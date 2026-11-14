@@ -114,3 +114,18 @@ startup without errors. Neither smoke test started audio recording.
 Windows execution, real audio capture, first-launch recording permissions, long
 recordings, and live Whisper/LLM model inference remain unverified. The workflow is
 provided but has not been run on GitHub from this local branch.
+
+
+### 1.0.8: macOS Settings crash
+
+Native Cocoa tray callbacks now post Python-only queue entries; a Tk-owned timer
+runs their UI actions. Calling `root.after` directly from Cocoa could re-enter Tcl
+with a NULL Python thread state and abort the process. Power notifications use the
+same dispatch path. Regression tests enter the real native menu through Cocoa
+NSTimer callbacks and repeatedly select Settings, Offline, Recording, About and
+Summary Queue before exiting. These run in a subprocess so a fatal abort fails the
+test rather than taking down the suite.
+
+The Mac build now records the application version in Info.plist and creates
+`dist/ATR-macOS.zip` with `ditto`, preserving bundle symlinks and executable bits
+when the package is uploaded as a GitHub Actions artifact.
