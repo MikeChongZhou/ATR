@@ -35,6 +35,8 @@ from PIL import Image, ImageDraw, ImageGrab
 from pystray import Menu, MenuItem
 from tkinter import filedialog, messagebox, ttk
 
+from atr_platform import (data_directory, capture_sources, start_tray,
+                          is_microphone_in_use_by_other_app, default_microphone_mode, install_power_hooks)
 from transcriber_worker import run_transcriber_process
 from summary_queue import SummaryQueueStore
 from meeting_end import MeetingEndPolicy
@@ -58,9 +60,9 @@ REVIEW_MIN_AUDIO_SECONDS = 3
 MINUTES_UPDATE_SECONDS = 5
 AUTO_SCREENSHOT_INTERVAL_SECONDS = 30
 ENGLISH_WHISPER_MODEL = "distil-small.en"
-ENGLISH_MODEL_DIR = Path(__file__).with_name("models") / "faster-distil-whisper-small.en"
+ENGLISH_MODEL_DIR = data_directory(Path(__file__).resolve().parent) / "models" / "faster-distil-whisper-small.en"
 CHINESE_WHISPER_MODEL = "small"
-CHINESE_MODEL_DIR = Path(__file__).with_name("models") / "faster-whisper-small"
+CHINESE_MODEL_DIR = data_directory(Path(__file__).resolve().parent) / "models" / "faster-whisper-small"
 DEFAULT_TRANSCRIPTION_LANGUAGE = "en"
 CUSTOM_MODEL_PRESET_LABEL = "Custom / manual"
 WHISPER_MODEL_PRESETS: dict[str, list[dict[str, str]]] = {
@@ -317,6 +319,7 @@ TRANSLATIONS = {
         "transcription_language_english": "English",
         "transcription_language_chinese": "Chinese",
         "auto_screenshot_option": "Auto Screenshot",
+        "microphone_mode": "Microphone (auto / on / off)",
         "start": "Start",
         "cancel": "Cancel",
         "screenshot_saved": "Screenshot saved:",
@@ -386,6 +389,7 @@ TRANSLATIONS = {
         "transcription_language_english": "英文",
         "transcription_language_chinese": "中文",
         "auto_screenshot_option": "自动截屏",
+        "microphone_mode": "麦克风（auto 自动 / on 开启 / off 关闭）",
         "start": "开始",
         "cancel": "取消",
         "screenshot_saved": "截屏已保存：",
@@ -444,6 +448,7 @@ def quiet_library_noise() -> None:
 
 def configure_logging() -> None:
     log_path = app_directory() / "local_meeting_recorder.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     if not any(isinstance(handler, RotatingFileHandler) for handler in root_logger.handlers):
@@ -492,62 +497,12 @@ def raise_current_thread_priority() -> None:
             set_thread_priority(thread, thread_priority_above_normal)
 
 
-def is_microphone_in_use_by_other_app() -> bool:
-    if sys.platform != "win32":
-        return False
-
-    try:
-        import comtypes
-        from pycaw.constants import AudioSessionState
-        from pycaw.pycaw import AudioSession, AudioUtilities, IAudioSessionControl2
-    except Exception:
-        return False
-
-    com_initialized = False
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            comtypes.CoInitialize()
-            com_initialized = True
-
-            microphone = AudioUtilities.CreateDevice(AudioUtilities.GetMicrophone())
-            if microphone is None:
-                return False
-
-            with contextlib.suppress(Exception):
-                if microphone.EndpointVolume.GetMute():
-                    return False
-
-            session_enumerator = microphone.AudioSessionManager.GetSessionEnumerator()
-            active_value = getattr(AudioSessionState.Active, "value", AudioSessionState.Active)
-            active_state = int(active_value)
-            current_pid = os.getpid()
-            for index in range(session_enumerator.GetCount()):
-                control = session_enumerator.GetSession(index)
-                if control is None:
-                    continue
-                session = AudioSession(control.QueryInterface(IAudioSessionControl2))
-                process_id = int(session.ProcessId)
-                if int(session.State) == active_state and process_id not in (0, current_pid):
-                    return True
-    except Exception:
-        return False
-    finally:
-        if com_initialized:
-            with contextlib.suppress(Exception):
-                comtypes.CoUninitialize()
-
-    return False
-
-
 def recording_file_stem() -> str:
     return dt.datetime.now().strftime("%Y%m%d_%H%M")
 
 
 def app_directory() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+    return data_directory(Path(__file__).resolve().parent)
 
 
 def models_directory() -> Path:
@@ -899,6 +854,7 @@ def default_realtime_settings() -> dict[str, Any]:
     chinese_preset = default_whisper_preset("zh")
     llm_preset = default_llm_preset()
     return {
+        "microphone_mode": default_microphone_mode(),
         "sample_rate": TRANSCRIBE_SAMPLE_RATE,
         "whisper_device": WHISPER_DEVICE,
         "compute_type": WHISPER_COMPUTE_TYPE,
@@ -3580,11 +3536,12 @@ class MeetingRecorderApp:
         )
 
     def run(self) -> None:
-        tray_thread = threading.Thread(target=self.icon.run, name="tray", daemon=True)
-        tray_thread.start()
+        start_tray(self.icon)
+        cleanup_power_hooks = install_power_hooks(self.emergency_stop_and_save)
         try:
             self.root.mainloop()
         finally:
+            cleanup_power_hooks()
             with contextlib.suppress(Exception):
                 self.icon.stop()
 
@@ -3934,7 +3891,7 @@ class MeetingRecorderApp:
         window = tk.Toplevel(self.root)
         self.recording_options_window = window
         window.title(self.t("recording_options_title"))
-        window.geometry("480x420")
+        window.geometry("480x490")
         window.resizable(False, False)
         window.protocol("WM_DELETE_WINDOW", self.close_recording_options_window)
 
@@ -3965,6 +3922,12 @@ class MeetingRecorderApp:
             variable=self.recording_options_auto_screenshot_var,
         ).pack(anchor=tk.W, pady=(14, 0))
 
+        SelectableLabel(frame, text=self.t("microphone_mode")).pack(anchor=tk.W, pady=(8, 4))
+        self.recording_microphone_var = tk.StringVar(
+            value=self.realtime_settings.get("microphone_mode", default_microphone_mode()))
+        ttk.Combobox(frame, textvariable=self.recording_microphone_var,
+                     values=("auto", "on", "off"), state="readonly").pack(anchor=tk.W)
+
         SelectableLabel(frame, text=self.t("recognition_prompt")).pack(anchor=tk.W, pady=(14, 4))
         self.recording_options_prompt_text = tk.Text(frame, height=8, wrap=tk.WORD, font=("Microsoft YaHei UI", 10))
         self.recording_options_prompt_text.pack(fill=tk.BOTH, expand=True)
@@ -3979,12 +3942,13 @@ class MeetingRecorderApp:
             side=tk.RIGHT, padx=(0, 8)
         )
 
-        window.bind("<Control-Return>", lambda _event: self.accept_recording_options())
+        window.bind("<Command-Return>" if sys.platform == "darwin" else "<Control-Return>",
+                    lambda _event: self.accept_recording_options())
         window.bind("<Escape>", lambda _event: self.close_recording_options_window())
         window.update_idletasks()
         x = max(0, (window.winfo_screenwidth() - window.winfo_width()) // 2)
         y = max(0, (window.winfo_screenheight() - window.winfo_height()) // 2)
-        window.geometry(f"480x420+{x}+{y}")
+        window.geometry(f"480x490+{x}+{y}")
         with contextlib.suppress(Exception):
             window.attributes("-topmost", True)
         with contextlib.suppress(Exception):
@@ -4019,6 +3983,7 @@ class MeetingRecorderApp:
         auto_screenshot = bool(auto_screenshot_var.get()) if auto_screenshot_var is not None else False
         recognition_prompt = prompt_text.get("1.0", tk.END).strip() if prompt_text is not None else ""
         self.recording_prompts[language] = recognition_prompt
+        self.realtime_settings["microphone_mode"] = self.recording_microphone_var.get()
         self.save_user_settings()
         self.close_recording_options_window()
         self.begin_recording(language, auto_screenshot, recognition_prompt)
@@ -4325,14 +4290,10 @@ class MeetingRecorderApp:
         capture_block_seconds = CAPTURE_BLOCK_SECONDS
 
         try:
-            import soundcard as sc
-
-            speaker = sc.default_speaker()
-            loopback = sc.get_microphone(speaker.name, include_loopback=True)
-            capture_sources: list[tuple[str, object]] = [("source_speaker", loopback)]
-            if RECORD_MICROPHONE and is_microphone_in_use_by_other_app():
-                with contextlib.suppress(Exception):
-                    capture_sources.append(("source_microphone", sc.default_microphone()))
+            mode = session.realtime_settings.get("microphone_mode", default_microphone_mode())
+            if not RECORD_MICROPHONE:
+                mode = "off"
+            sources = capture_sources(mode, session.stop_event)
 
             settings = session.realtime_settings
             chunk_seconds = max(0.05, float(settings.get("chunk_seconds", CHUNK_SECONDS)))
@@ -4344,12 +4305,12 @@ class MeetingRecorderApp:
             chunk_frames = max(1, int(RECORD_SAMPLE_RATE * chunk_seconds))
 
             source_queues = {
-                source_name: queue.Queue() for source_name, _source in capture_sources
+                source_name: queue.Queue() for source_name, _source in sources
             }
             source_done = {name: False for name in source_queues}
             source_errors: "queue.Queue[tuple[str, Exception]]" = queue.Queue()
 
-            for source_name, source in capture_sources:
+            for source_name, source in sources:
                 thread = threading.Thread(
                     target=self.audio_capture_worker,
                     args=(
@@ -5313,7 +5274,7 @@ class MeetingRecorderApp:
                 )
             logging.info("stop[%s] background finalizing transcript", session.file_stem)
             self.finalize_transcript_from_review(session)
-            queue_summary = not session.stop_reason.startswith("windows_") and not self.shutting_down
+            queue_summary = not session.stop_reason.startswith(("windows_", "macos_")) and not self.shutting_down
             logging.info("stop[%s] background saving final transcript queue_summary=%s", session.file_stem, queue_summary)
             self.save_session_to_output(session, queue_summary=queue_summary)
         except Exception:
@@ -6011,7 +5972,7 @@ class MeetingRecorderApp:
         self.update_tray_menu()
         logging.info("stop[%s] complete_stop set state idle", session.file_stem)
 
-        notify_user = not session.stop_reason.startswith("windows_") and not self.shutting_down
+        notify_user = not session.stop_reason.startswith(("windows_", "macos_")) and not self.shutting_down
         session.cleanup()
         self.session = None
         self.clear_transcript()
@@ -6302,7 +6263,8 @@ class MeetingRecorderApp:
 
     def system_cpu_percent(self) -> float:
         if sys.platform != "win32":
-            return 0.0
+            import psutil
+            return psutil.cpu_percent(interval=None)
         try:
             import ctypes
             from ctypes import wintypes
@@ -6341,7 +6303,9 @@ class MeetingRecorderApp:
 
     def system_memory_status(self) -> tuple[float, float]:
         if sys.platform != "win32":
-            return 0.0, 0.0
+            import psutil
+            memory = psutil.virtual_memory()
+            return memory.percent, memory.available / (1024 * 1024)
         try:
             import ctypes
 
@@ -6464,7 +6428,7 @@ class MeetingRecorderApp:
                     model_source = model_ref
                 extra_args = str(settings.get("llm_server_extra_args", "") or "").strip()
                 if extra_args:
-                    command.extend(shlex.split(extra_args, posix=False))
+                    command.extend(shlex.split(extra_args, posix=sys.platform != "win32"))
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
                 try:
                     logging.info("summary starting managed LLM: executable=%s model=%s host=%s port=%s context=%s slots=%s", executable, model_source, host, port, context_size, slots)

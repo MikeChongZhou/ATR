@@ -1,6 +1,6 @@
 # 本地会议录音
 
-这是一个 Windows 本地托盘录音工具。程序启动后默认显示英文界面，只显示托盘图标，右键图标可以打开菜单：
+这是一个以 Windows 为原有实现、正在增加 macOS 支持的本地托盘录音工具。Mac 版安装、构建、权限和当前限制见 [跨平台说明](CROSS_PLATFORM.md)。程序启动后默认显示英文界面，只显示托盘图标，右键图标可以打开菜单：
 
 - 🔴 Start Recording / ◼ Stop Recording
 - Text Window

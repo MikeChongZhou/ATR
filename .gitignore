@@ -27,3 +27,5 @@ local_meeting_recorder_settings.json
 *.log
 
 main - Copy*.py
+
+native/macos/atr-system-audio

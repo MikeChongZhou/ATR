@@ -32,11 +32,17 @@ def find_runtime(directory: Path, configured: str = "") -> str | None:
         if found:
             return found
         raise RuntimeError(f"Configured llama executable was not found: {configured}. Clear the executable setting to download it automatically.")
-    for name in ("llama-server.exe", "llama.exe"):
+    for name in ("llama-server", "llama", "llama-server.exe", "llama.exe"):
         for parent in (directory / "llm", directory):
             candidate = parent / name
             if candidate.is_file():
                 return str(candidate.resolve())
+    # Finder-launched apps often have a minimal PATH.
+    if platform.system() == "Darwin":
+        for prefix in (Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
+            candidate = prefix / "llama-server"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
     return shutil.which("llama-server") or shutil.which("llama")
 
 
@@ -72,7 +78,9 @@ def ensure_runtime(directory: Path, configured: str = "", progress: Callable[[st
     if existing:
         return existing
     if platform.system() != "Windows":
-        raise RuntimeError("Automatic llama runtime setup is only supported on Windows.")
+        raise RuntimeError("Automatic llama runtime setup is only supported on Windows. "
+                           "On macOS install llama.cpp (brew install llama.cpp), select a llama-server executable, "
+                           "or disable managed server and configure an existing local API.")
 
     def check_cancelled():
         if cancelled():
