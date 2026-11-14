@@ -10,5 +10,5 @@ class Recorder(Protocol):
 
 
 class CaptureSource(Protocol):
-    def recorder(self, *, samplerate: int, channels: int, blocksize: int) -> ContextManager[Recorder]:
+    def recorder(self, *, samplerate: int, channels: int, blocksize: int | None) -> ContextManager[Recorder]:
         ...

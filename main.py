@@ -36,7 +36,8 @@ from pystray import Menu, MenuItem
 from tkinter import filedialog, messagebox, ttk
 
 from atr_platform import (data_directory, capture_sources, start_tray,
-                          is_microphone_in_use_by_other_app, default_microphone_mode, install_power_hooks)
+                          is_microphone_in_use_by_other_app, default_microphone_mode, install_power_hooks,
+                          audio_device_blocksize)
 from ui_dispatch import UiDispatcher
 from transcriber_worker import run_transcriber_process
 from summary_queue import SummaryQueueStore
@@ -46,7 +47,7 @@ from desktop_ui import (EmbeddedPanel, SummaryQueueView, MouseWheelRouter, CopyT
 
 
 APP_NAME = "Local Meeting Recorder"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -1314,7 +1315,7 @@ class AudioMciPlayer:
                 fallback_skipped = 0
                 fallback_target_skip = 0 if seek_succeeded else max(0, int(start_seconds * sample_rate))
 
-                with speaker.player(samplerate=sample_rate, channels=1, blocksize=block_size) as player:
+                with speaker.player(samplerate=sample_rate, channels=1, blocksize=audio_device_blocksize(block_size)) as player:
                     for packet in container.demux(stream):
                         if stop_event.is_set():
                             break
@@ -2306,7 +2307,7 @@ class OfflineTranscriptWindow:
 
             block_size = max(1, int(sample_rate * 0.1))
             speaker = sc.default_speaker()
-            with speaker.player(samplerate=sample_rate, channels=1, blocksize=block_size) as player:
+            with speaker.player(samplerate=sample_rate, channels=1, blocksize=audio_device_blocksize(block_size)) as player:
                 for offset in range(0, chunk.size, block_size):
                     if self.stop_event.is_set():
                         break
@@ -4706,7 +4707,7 @@ class MeetingRecorderApp:
             with source.recorder(
                 samplerate=RECORD_SAMPLE_RATE,
                 channels=CHANNELS,
-                blocksize=block_frames,
+                blocksize=audio_device_blocksize(block_frames),
             ) as recorder:
                 while not session.stop_event.is_set():
                     if not session.active_event.wait(0.02):

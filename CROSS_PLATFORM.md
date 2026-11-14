@@ -129,3 +129,14 @@ test rather than taking down the suite.
 The Mac build now records the application version in Info.plist and creates
 `dist/ATR-macOS.zip` with `ditto`, preserving bundle symlinks and executable bits
 when the package is uploaded as a GitHub Actions artifact.
+
+
+### 1.0.9: CoreAudio device buffer compatibility
+
+Mac recording and both offline playback paths now let SoundCard use the device's
+native hardware buffer (`blocksize=None`). The software read and transcription
+chunk sizes remain independent. Previously the capture worker requested 9600
+hardware frames by default, which fails on AudioUnits limited to 512 frames.
+Windows retains the existing explicit buffer sizes. A capture-worker regression
+uses the reported 15–512 frame hardware limit and verifies that 2400-frame reads
+still assemble a complete 24000-frame audio block without losing samples.

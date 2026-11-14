@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import queue
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -56,6 +58,78 @@ class PlatformTests(unittest.TestCase):
         with patch.dict(sys.modules, soundcard=soundcard), patch.object(macos, "helper_path"):
             self.assertEqual(len(macos.capture_sources("off", threading.Event())), 1)
         soundcard.default_microphone.assert_not_called()
+
+
+class DeviceBufferTests(unittest.TestCase):
+    def test_coreaudio_uses_device_default_instead_of_software_chunk_size(self):
+        with patch.object(platform.sys, "platform", "darwin"):
+            for requested in (9600, 4800, 256):
+                self.assertIsNone(platform.audio_device_blocksize(requested))
+        with patch.object(platform.sys, "platform", "win32"):
+            self.assertEqual(platform.audio_device_blocksize(9600), 9600)
+
+    def test_mac_capture_assembles_half_second_from_device_default_buffer(self):
+        import main
+        import numpy as np
+        app = main.MeetingRecorderApp.__new__(main.MeetingRecorderApp)
+        session = SimpleNamespace(stop_event=threading.Event(), active_event=threading.Event())
+        session.active_event.set()
+        source = Mock()
+        recorder = Mock()
+        reads = []
+
+        def open_recorder(**kwargs):
+            # Reproduce the reported CoreAudio constraint. The software read
+            # can exceed this limit; it must not be sent to the hardware.
+            size = kwargs["blocksize"]
+            if size is not None and not 15 <= size <= 512:
+                raise TypeError("blocksize must be between 15.0 and 512")
+            context = Mock()
+            context.__enter__ = Mock(return_value=recorder)
+            context.__exit__ = Mock(return_value=False)
+            return context
+
+        def read(numframes):
+            reads.append(numframes)
+            if len(reads) == 10:
+                session.stop_event.set()
+            return np.full((numframes, 1), .25, dtype=np.float32)
+
+        source.recorder.side_effect = open_recorder
+        recorder.record.side_effect = read
+        output, errors = queue.Queue(), queue.Queue()
+        with patch.object(platform.sys, "platform", "darwin"):
+            app.audio_capture_worker(session, "source_microphone", source,
+                                     output, errors, .5, .05, .2)
+        self.assertTrue(errors.empty())
+        self.assertEqual(reads, [2400] * 10)
+        audio = output.get_nowait()
+        self.assertEqual(audio.shape, (24000,))
+        np.testing.assert_array_equal(audio, np.full(24000, .25, dtype=np.float32))
+        self.assertIsNone(output.get_nowait())
+        self.assertTrue(output.empty())
+        source.recorder.assert_called_once_with(samplerate=48000, channels=1, blocksize=None)
+
+    def test_mac_chunk_playback_uses_device_default_but_keeps_software_blocks(self):
+        import main
+        import numpy as np
+        player = Mock()
+        context = Mock()
+        context.__enter__ = Mock(return_value=player)
+        context.__exit__ = Mock(return_value=False)
+        soundcard = Mock()
+        soundcard.default_speaker.return_value.player.return_value = context
+        window = main.OfflineTranscriptWindow.__new__(main.OfflineTranscriptWindow)
+        window.stop_event = threading.Event()
+        window.active_event = threading.Event()
+        window.active_event.set()
+        with patch.dict(sys.modules, soundcard=soundcard), \
+                patch.object(platform.sys, "platform", "darwin"):
+            window.play_chunk_audio(np.zeros(24000, dtype=np.float32), 48000)
+        soundcard.default_speaker.return_value.player.assert_called_once_with(
+            samplerate=48000, channels=1, blocksize=None)
+        self.assertEqual(player.play.call_count, 5)
+        self.assertEqual(sum(call.args[0].size for call in player.play.call_args_list), 24000)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "POSIX pipe capture backend")

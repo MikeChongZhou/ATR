@@ -18,6 +18,16 @@ def data_directory(source_directory: Path) -> Path:
     return source_directory
 
 
+def audio_device_blocksize(requested_frames: int) -> int | None:
+    """Keep CoreAudio's device buffer separate from software read/chunk sizes.
+
+    SoundCard's macOS AudioUnit can reject large buffers (often over 512
+    frames). None selects the device default; record(numframes=...) still
+    accumulates the requested number of samples in software.
+    """
+    return None if sys.platform == "darwin" else requested_frames
+
+
 def default_microphone_mode() -> str:
     return "on" if sys.platform == "darwin" else "auto"
 
