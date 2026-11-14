@@ -3540,6 +3540,10 @@ class MeetingRecorderApp:
 
     def run(self) -> None:
         self.ui_dispatcher.start()
+        if sys.platform == "darwin":
+            self.root.createcommand("tk::mac::ReopenApplication",
+                                    lambda: self.ui_dispatcher.post(self.show_main_tab))
+            self.ui_dispatcher.post(self.show_main_tab)
         start_tray(self.icon)
         cleanup_power_hooks = install_power_hooks(
             lambda reason: self.ui_dispatcher.post(self.emergency_stop_and_save, reason))

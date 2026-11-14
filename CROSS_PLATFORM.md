@@ -178,3 +178,12 @@ and explains stale authorization instead of showing only a failed screencapture
 command. The audio helper also checks access before starting capture and can show
 the normal system permission prompt. 54 local tests cover denied access, the
 screencapture failure path, audio buffer limits, and native menu navigation.
+
+
+Manual validation on the user's Mac: after replacing the stale permission entry
+with the Developer ID-signed 1.0.10 app, screenshot capture and system-audio
+recording both succeeded. JPG screenshots and the finalized MP3 were verified;
+the system-audio helper exited after Stop Recording. The same signing identity
+also survived a subsequent rebuild of that app. Mac launches and Dock reopen
+requests now show the main window through the Tk-owned dispatcher; Windows keeps
+its tray-first startup.
