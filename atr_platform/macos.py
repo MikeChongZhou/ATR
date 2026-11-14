@@ -108,3 +108,26 @@ def capture_sources(microphone_mode, stop_event):
         import soundcard as sc
         sources.append(("source_microphone", sc.default_microphone()))
     return sources
+
+
+def capture_permission_message():
+    executable = Path(sys.executable).resolve()
+    app = next((parent for parent in executable.parents if parent.suffix == ".app"), executable)
+    return (
+        "macOS denied Screen & System Audio Recording for this copy of ATR. "
+        "If the permission switch is already on after an update, its saved code signature may be stale. "
+        "Quit ATR, remove the old LocalMeetingRecorder entry with the minus button, "
+        "then add this copy with the plus button and enable it. Reopen ATR afterwards. "
+        f"App: {app}"
+    )
+
+
+def capture_screenshot():
+    from Quartz import CGPreflightScreenCaptureAccess
+    from PIL import ImageGrab
+    if not CGPreflightScreenCaptureAccess():
+        raise PermissionError(capture_permission_message())
+    try:
+        return ImageGrab.grab()
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("macOS could not capture a screenshot. " + capture_permission_message()) from exc

@@ -146,3 +146,35 @@ Mac CI uses Homebrew's current Python 3.11 and matching Tk package, matching the
 local build environment. The runner's cached setup-python 3.11.9 crashed in the
 existing multi-window UI tests on macOS 26.7; the microphone-buffer tests passed
 before that crash. Windows continues to use setup-python.
+
+
+### 1.0.10: stable signing and capture permission diagnostics
+
+The local Mac build accepts `--sign-identity` (or `ATR_MAC_SIGN_IDENTITY`) and
+`--output-dir`. Use an installed Developer ID or Apple Development identity for
+stable TCC identity across updates. For example:
+
+```sh
+python packaging/build_macos.py --output-dir dist/macos-1.0.10 \
+  --sign-identity "Developer ID Application: Your Name (TEAMID)"
+```
+
+The build signs native code and the enclosing app with that identity, verifies
+the bundle, and produces a ZIP. This local signing mode does not require Apple's
+timestamp service and does not claim notarized public distribution. Signing keys
+are never exported. Without an identity the GitHub CI package remains an ad-hoc
+test build; replacing a certificate-signed local app with an ad-hoc CI app can
+invalidate the user's saved capture authorization again.
+
+An ad-hoc signature's designated requirement is tied to a changing code hash.
+System Settings may still show its old permission switch as on after a rebuild,
+while TCC denies the current code. After switching to a stable signing identity,
+the user must grant the new identity once: quit the old copy, remove its stale
+entry, add the current signed app under Screen & System Audio Recording, then
+reopen the app. The application never changes TCC or privacy settings itself.
+
+Screenshot capture now checks actual CoreGraphics access before invoking Pillow,
+and explains stale authorization instead of showing only a failed screencapture
+command. The audio helper also checks access before starting capture and can show
+the normal system permission prompt. 54 local tests cover denied access, the
+screencapture failure path, audio buffer limits, and native menu navigation.

@@ -37,7 +37,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from atr_platform import (data_directory, capture_sources, start_tray,
                           is_microphone_in_use_by_other_app, default_microphone_mode, install_power_hooks,
-                          audio_device_blocksize)
+                          audio_device_blocksize, capture_screenshot)
 from ui_dispatch import UiDispatcher
 from transcriber_worker import run_transcriber_process
 from summary_queue import SummaryQueueStore
@@ -47,7 +47,7 @@ from desktop_ui import (EmbeddedPanel, SummaryQueueView, MouseWheelRouter, CopyT
 
 
 APP_NAME = "Local Meeting Recorder"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -3683,10 +3683,7 @@ class MeetingRecorderApp:
         return path
 
     def capture_screen_image(self) -> Image.Image:
-        try:
-            image = ImageGrab.grab(all_screens=True)
-        except TypeError:
-            image = ImageGrab.grab()
+        image = capture_screenshot()
         if image.mode != "RGB":
             image = image.convert("RGB")
         return image
@@ -4745,6 +4742,7 @@ class MeetingRecorderApp:
             except queue.Empty:
                 return
 
+            logging.warning("Audio source %s unavailable: %s", source_name, exc)
             if self.session is session and not session.stop_event.is_set():
                 self.root.after(
                     0,

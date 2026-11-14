@@ -4,6 +4,7 @@ import Foundation
 import ScreenCaptureKit
 import CoreMedia
 import AVFoundation
+import CoreGraphics
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -55,6 +56,12 @@ final class AudioOutput: NSObject, SCStreamOutput, SCStreamDelegate {
 @available(macOS 13.0, *)
 func capture() async {
     do {
+        guard CGPreflightScreenCaptureAccess() else {
+            // The user can accept the system prompt; a new process may be
+            // needed before an updated grant takes effect.
+            _ = CGRequestScreenCaptureAccess()
+            fail("Screen capture permission is denied for this copy of ATR. If the switch is already on after an update, quit ATR, remove the old LocalMeetingRecorder entry in Screen & System Audio Recording, then add the current app and reopen it.")
+        }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first else { fail("No display is available for system audio capture.") }
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])

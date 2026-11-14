@@ -76,3 +76,14 @@ def install_power_hooks(on_stop):
         for token in tokens:
             center.removeObserver_(token)
     return cleanup
+
+
+def capture_screenshot():
+    if sys.platform == "darwin":
+        from .macos import capture_screenshot as capture
+        return capture()
+    from PIL import ImageGrab
+    try:
+        return ImageGrab.grab(all_screens=True)
+    except TypeError:
+        return ImageGrab.grab()

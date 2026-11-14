@@ -181,5 +181,36 @@ class MacCaptureTests(unittest.TestCase):
             self.assertIsNone(recorder.process.poll())
 
 
+class ScreenshotPermissionTests(unittest.TestCase):
+    def test_denied_permission_is_reported_before_running_screencapture(self):
+        from atr_platform import macos
+        quartz = Mock()
+        quartz.CGPreflightScreenCaptureAccess.return_value = False
+        with patch.dict(sys.modules, Quartz=quartz), patch('PIL.ImageGrab.grab') as grab:
+            with self.assertRaisesRegex(PermissionError, 'saved code signature may be stale'):
+                macos.capture_screenshot()
+        grab.assert_not_called()
+
+    def test_screencapture_failure_explains_how_to_rebind_current_app(self):
+        import subprocess
+        from atr_platform import macos
+        quartz = Mock()
+        quartz.CGPreflightScreenCaptureAccess.return_value = True
+        error = subprocess.CalledProcessError(1, ['screencapture', '-x', '/tmp/test.png'])
+        with patch.dict(sys.modules, Quartz=quartz), patch('PIL.ImageGrab.grab', side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, 'add this copy with the plus button') as caught:
+                macos.capture_screenshot()
+        self.assertIs(caught.exception.__cause__, error)
+
+    def test_shared_screenshot_pipeline_keeps_rgb_output(self):
+        import main
+        from PIL import Image
+        app = main.MeetingRecorderApp.__new__(main.MeetingRecorderApp)
+        with patch('main.capture_screenshot', return_value=Image.new('RGBA', (3, 2))):
+            image = app.capture_screen_image()
+        self.assertEqual(image.mode, 'RGB')
+        self.assertEqual(image.size, (3, 2))
+
+
 if __name__ == "__main__":
     unittest.main()
