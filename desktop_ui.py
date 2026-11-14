@@ -3,7 +3,6 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 from pathlib import Path
-import os
 import sys
 
 
@@ -331,7 +330,7 @@ class SummaryQueueView(ttk.Frame):
                 bar.pack(fill="x", pady=6)
                 buttons = ttk.Frame(row)
                 buttons.pack(fill="x")
-                ttk.Button(buttons, text="Open transcript", command=lambda p=record["text_path"]: os.startfile(str(Path(p).resolve()))).pack(side="left")
+                ttk.Button(buttons, text="Open transcript", command=lambda p=record["text_path"]: self.app.open_local_path(p)).pack(side="left")
                 retry = ttk.Button(buttons, text="Retry", command=lambda i=identity: self.app.retry_summary(i))
                 retry.pack(side="right")
                 self.rows[identity] = label, bar, retry

@@ -87,3 +87,18 @@ def capture_screenshot():
         return ImageGrab.grab(all_screens=True)
     except TypeError:
         return ImageGrab.grab()
+
+
+def open_path(path) -> None:
+    """Open a local transcript or folder with the platform's default handler."""
+    import subprocess
+    target = Path(path).expanduser().resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"File or folder does not exist: {target}")
+    if sys.platform == "win32":
+        os.startfile(str(target))
+    elif sys.platform == "darwin":
+        subprocess.run(["/usr/bin/open", str(target)], check=True,
+                       capture_output=True, text=True, timeout=10)
+    else:
+        raise RuntimeError(f"Opening local files is unsupported on {sys.platform}")

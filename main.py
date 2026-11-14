@@ -37,7 +37,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from atr_platform import (data_directory, capture_sources, start_tray,
                           is_microphone_in_use_by_other_app, default_microphone_mode, install_power_hooks,
-                          audio_device_blocksize, capture_screenshot)
+                          audio_device_blocksize, capture_screenshot, open_path)
 from ui_dispatch import UiDispatcher
 from transcriber_worker import run_transcriber_process
 from summary_queue import SummaryQueueStore
@@ -47,7 +47,7 @@ from desktop_ui import (EmbeddedPanel, SummaryQueueView, MouseWheelRouter, CopyT
 
 
 APP_NAME = "Local Meeting Recorder"
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -3543,6 +3543,8 @@ class MeetingRecorderApp:
         if sys.platform == "darwin":
             self.root.createcommand("tk::mac::ReopenApplication",
                                     lambda: self.ui_dispatcher.post(self.show_main_tab))
+            self.root.createcommand("tk::mac::Quit",
+                                    lambda: self.ui_dispatcher.post(self.exit_app))
             self.ui_dispatcher.post(self.show_main_tab)
         start_tray(self.icon)
         cleanup_power_hooks = install_power_hooks(
@@ -3584,7 +3586,7 @@ class MeetingRecorderApp:
             ttk.Button(screen, text="Take screenshot", command=self.take_manual_screenshot).pack(anchor="w", pady=6)
             self.screenshot_toggle = ttk.Button(screen, command=self.toggle_auto_screenshot)
             self.screenshot_toggle.pack(anchor="w", pady=6)
-            ttk.Button(screen, text="Open screenshot folder", command=lambda: os.startfile(str(self.ensure_screenshot_dir()))).pack(anchor="w", pady=6)
+            ttk.Button(screen, text="Open screenshot folder", command=lambda: self.open_local_path(self.ensure_screenshot_dir())).pack(anchor="w", pady=6)
             self.screenshot_status = SelectableLabel(screen, wraplength=850)
             self.screenshot_status.pack(anchor="w", pady=12)
             self.show_about()
@@ -3685,6 +3687,13 @@ class MeetingRecorderApp:
             path = directory / f"{stem}_{index}.jpg"
             index += 1
         return path
+
+    def open_local_path(self, path) -> None:
+        try:
+            open_path(path)
+        except Exception as exc:
+            logging.exception("Could not open local file or folder: %s", path)
+            messagebox.showerror(self.title(), f"Could not open file or folder:\n{path}\n\n{exc}")
 
     def capture_screen_image(self) -> Image.Image:
         image = capture_screenshot()

@@ -212,5 +212,43 @@ class ScreenshotPermissionTests(unittest.TestCase):
         self.assertEqual(image.size, (3, 2))
 
 
+class OpenPathTests(unittest.TestCase):
+    def test_mac_opens_file_and_folder_without_splitting_spaces(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "Meeting screenshots"
+            folder.mkdir()
+            transcript = folder / "meeting transcript.txt"
+            transcript.write_text("Test transcript")
+            with patch.object(platform.sys, "platform", "darwin"), patch('subprocess.run') as launch:
+                for target in (folder, transcript):
+                    platform.open_path(target)
+                    launch.assert_called_with(['/usr/bin/open', str(target.resolve())],
+                                              check=True, capture_output=True, text=True, timeout=10)
+
+    def test_windows_uses_existing_shell_handler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(platform.sys, "platform", "win32"), \
+                    patch.object(platform.os, "startfile", create=True) as launch:
+                platform.open_path(directory)
+                launch.assert_called_once_with(str(Path(directory).resolve()))
+
+    def test_missing_target_is_reported_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory, patch('subprocess.run') as launch:
+            with self.assertRaises(FileNotFoundError):
+                platform.open_path(Path(directory) / "missing.txt")
+            launch.assert_not_called()
+
+    def test_failed_open_is_shown_instead_of_silently_ignored(self):
+        import main
+        import subprocess
+        app = main.MeetingRecorderApp.__new__(main.MeetingRecorderApp)
+        app.title = Mock(return_value="ATR")
+        failure = subprocess.CalledProcessError(1, ['/usr/bin/open', '/tmp/file.txt'])
+        with patch('main.open_path', side_effect=failure), patch('main.messagebox.showerror') as report:
+            app.open_local_path('/tmp/file.txt')
+        report.assert_called_once()
+        self.assertIn('/tmp/file.txt', report.call_args.args[1])
+
+
 if __name__ == "__main__":
     unittest.main()

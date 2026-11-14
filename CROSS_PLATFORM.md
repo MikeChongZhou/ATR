@@ -187,3 +187,19 @@ the system-audio helper exited after Stop Recording. The same signing identity
 also survived a subsequent rebuild of that app. Mac launches and Dock reopen
 requests now show the main window through the Tk-owned dispatcher; Windows keeps
 its tray-first startup.
+
+
+### 1.0.11: local file opening and native Quit
+
+Open transcript and Open screenshot folder now share a platform-aware opener:
+Windows uses its shell handler and macOS invokes `/usr/bin/open` with one argument
+for the complete path. Missing files and launch failures are reported in the UI.
+Mac's standard Quit command now queues normal recorder cleanup instead of exiting
+Tcl directly. 58 regression tests pass, and the Developer ID-signed 1.0.11 app
+was built and opened successfully.
+
+On this Mac, the missing llama.cpp runtime was installed through Homebrew. ATR
+resolved `/opt/homebrew/bin/llama-server`, loaded the existing local Qwen model,
+and returned a valid response through its managed OpenAI-compatible API path in
+an isolated localhost test. The latest existing meeting-summary job also reached
+100% completion. The test server was stopped after validation.
