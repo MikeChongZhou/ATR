@@ -140,3 +140,9 @@ hardware frames by default, which fails on AudioUnits limited to 512 frames.
 Windows retains the existing explicit buffer sizes. A capture-worker regression
 uses the reported 15–512 frame hardware limit and verifies that 2400-frame reads
 still assemble a complete 24000-frame audio block without losing samples.
+
+
+Mac CI uses Homebrew's current Python 3.11 and matching Tk package, matching the
+local build environment. The runner's cached setup-python 3.11.9 crashed in the
+existing multi-window UI tests on macOS 26.7; the microphone-buffer tests passed
+before that crash. Windows continues to use setup-python.
