@@ -23,7 +23,9 @@ jobs:
           "$(brew --prefix python@3.11)/bin/python3.11" -m venv .venv
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - run: python -m pip install -r requirements.txt pyinstaller
-      - run: python -m unittest discover -v
+      - name: Show Python and Tk versions
+        run: python -c "import sys, tkinter; print(sys.version); t=tkinter.Tcl(); print('Tk', tkinter.TkVersion, 'Tcl', t.eval('info patchlevel'))"
+      - run: python -X faulthandler -m unittest discover -v
       - if: runner.os == 'macOS'
         run: python packaging/build_macos.py
       - if: runner.os == 'Windows'
