@@ -120,7 +120,8 @@ class SetupTests(unittest.TestCase):
         asset={'name':'llama-b123-bin-macos-arm64.tar.gz','browser_download_url':'https://github.com/ggml-org/llama.cpp/releases/download/b123/runtime.tar.gz','digest':'sha256:'+hashlib.sha256(raw).hexdigest()}
         with tempfile.TemporaryDirectory() as d,patch.object(llama_runtime,'find_runtime',return_value=None),patch.object(llama_runtime.platform,'system',return_value='Darwin'),patch.object(llama_runtime.platform,'machine',return_value='arm64'),patch.object(llama_runtime,'_open',side_effect=[Response(json.dumps([{'assets':[asset]}]).encode()),Response(raw)]):
             server=Path(llama_runtime.ensure_runtime(Path(d)))
-            self.assertTrue(server.stat().st_mode & 0o111)
+            if os.name != "nt":
+                self.assertTrue(server.stat().st_mode & 0o111)
             self.assertEqual((server.parent.parent/'lib/libllama.dylib').read_bytes(),b'library')
 
 
@@ -154,6 +155,8 @@ class SettingsIntegrationTests(unittest.TestCase):
                         app.accept_recording_options()
                     self.assertEqual(begin.call_args.args[-2:],('人工标题','Zoom'))
             finally:
+                for callback in root.tk.call("after", "info"):
+                    root.tk.call("after", "cancel", callback)
                 root.destroy()
 
 
