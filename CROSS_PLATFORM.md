@@ -203,3 +203,45 @@ resolved `/opt/homebrew/bin/llama-server`, loaded the existing local Qwen model,
 and returned a valid response through its managed OpenAI-compatible API path in
 an isolated localhost test. The latest existing meeting-summary job also reached
 100% completion. The test server was stopped after validation.
+
+
+### 1.0.12: meeting names, background LLM preparation, optional ASR engines
+
+Recording options detect visible Teams, Zoom, Feishu/Lark, VooV/Tencent Meeting,
+and Google Meet windows, offer a choice, and allow edits to the meeting name and
+application. The name is frozen when recording starts. MP3, transcript and
+screenshot folders share a sanitized `date_time_meeting_app` stem; unknown titles
+fall back to `Unnamed meeting`. Window detection retries briefly while the dialog
+is open, without overwriting edits. Browser meeting detection uses visible window
+(tab) titles, not hidden tabs. macOS may withhold titles without screen permission;
+manually entering a title always works. Windows active audio-session PIDs assist
+ranking; raw audio never identifies the app or meeting title.
+
+On launch, managed local LLM mode prepares the selected preset in a background
+thread. A fresh install uses Qwen3 1.7B Q4_K_M. Existing model/API choices are
+preserved. The Recording tab shows progress and Pause / Resume / Retry. Model
+partials survive pause/restart, HTTP Range resumes downloads, and completed LFS
+models are verified against their pinned revision's SHA256 before publication.
+Recording does not wait for setup; summaries wait while setup is active. The
+startup preparation checkbox can disable this behavior. macOS can now install an
+official checksum-verified llama.cpp runtime automatically, preserving its bin/lib
+layout; existing Homebrew or explicitly configured runtimes are reused. Runtime
+archive transfers restart after cancellation; large GGUF model transfers resume.
+
+English and Chinese model preset lists now also include the exact benchmarked
+Zipformer bilingual small, SenseVoice Small INT8 (2024-07-17), and bilingual
+streaming Paraformer INT8. These use sherpa-onnx 2.0.1 on CPU in the existing
+spawned worker for both live recording and offline transcription. ATR finalizes
+each configured audio window separately; native streaming models therefore do not
+yet provide token-by-token partial captions. Each source/job uses a separate
+stream. SenseVoice is non-streaming. Whisper-specific beam, prompt, VAD and compute
+options do not tune these engines; source capture, RMS filtering and chunk sizes
+still apply. Existing Whisper model selections remain unchanged. Only the selected
+INT8 files are fetched for SenseVoice/Paraformer; Zipformer uses the upstream
+archive and extracts the four required files (its archive contains extra variants).
+
+Validation: 70 tests pass, including settings persistence/offline routing, editable
+meeting titles, download pause/resume/checksum, macOS runtime layout and native
+Cocoa callbacks. All three ASR backends completed English and Chinese jobs through
+the real spawned worker. An isolated first-run test downloaded and SHA256-verified
+the 1,282,439,328-byte default GGUF, without changing the user's existing model.

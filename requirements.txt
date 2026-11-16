@@ -8,3 +8,4 @@ huggingface-hub>=0.21.0
 pycaw>=20220416; sys_platform == "win32"
 opencc-python-reimplemented>=0.1.7
 psutil>=5.9
+sherpa-onnx==2.0.1

@@ -54,7 +54,7 @@ def main():
                     "--distpath", str(output_dir),
                     "--osx-bundle-identifier", "com.mikechongzhou.atr",
                     "--add-binary", str(helper) + ":native/macos",
-                    "--collect-all", "faster_whisper", "--collect-data", "soundcard",
+                    "--collect-all", "faster_whisper", "--collect-all", "sherpa_onnx", "--collect-data", "soundcard",
                     "--hidden-import", "atr_platform.macos",
                     "--hidden-import", "psutil", str(ROOT / "main.py")], cwd=ROOT, check=True,
                    env={**os.environ, "PYINSTALLER_CONFIG_DIR": str(ROOT / "build/pyinstaller-cache")})

@@ -43,11 +43,14 @@ from transcriber_worker import run_transcriber_process
 from summary_queue import SummaryQueueStore
 from meeting_end import MeetingEndPolicy
 from llama_runtime import ensure_runtime, find_runtime, SetupCancelled
+import asr_models
+from meeting_titles import detect_meetings, meeting_stem
+from first_run_setup import LocalModelSetup
 from desktop_ui import (EmbeddedPanel, SummaryQueueView, MouseWheelRouter, CopyTextRouter, SelectableLabel, SelectableCheckbutton, SelectableRadiobutton, selectable_label_frame)
 
 
 APP_NAME = "Local Meeting Recorder"
-APP_VERSION = "1.0.11"
+APP_VERSION = "1.0.12"
 RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -512,7 +515,7 @@ def models_directory() -> Path:
 
 
 def whisper_presets(language: str) -> list[dict[str, str]]:
-    return WHISPER_MODEL_PRESETS.get(language, WHISPER_MODEL_PRESETS[DEFAULT_TRANSCRIPTION_LANGUAGE])
+    return WHISPER_MODEL_PRESETS.get(language, WHISPER_MODEL_PRESETS[DEFAULT_TRANSCRIPTION_LANGUAGE]) + asr_models.presets(language)
 
 
 def whisper_preset_by_id(language: str, preset_id: str) -> Optional[dict[str, str]]:
@@ -810,7 +813,7 @@ def extract_action_items(sentences: list[str], limit: int = 8) -> list[str]:
 
 
 def usable_model_dir(path: Path) -> bool:
-    return path.exists() and (path / "config.json").exists() and (path / "model.bin").exists()
+    return asr_models.usable(path)
 
 
 def transcription_model_config(language: str) -> dict[str, object]:
@@ -874,6 +877,7 @@ def default_realtime_settings() -> dict[str, Any]:
         "meeting_end_silence_seconds": 180.0,
         "meeting_end_microphone_release_seconds": 60.0,
         "meeting_end_reminder_seconds": 600.0,
+        "llm_auto_setup": True,
         "llm_summary_enabled": True,
         "llm_summary_base_url": "http://127.0.0.1:8080/v1/chat/completions",
         "llm_model_preset": llm_preset["id"],
@@ -1042,6 +1046,8 @@ class RecordingSession:
     transcription_language: str = DEFAULT_TRANSCRIPTION_LANGUAGE
     realtime_settings: dict[str, Any] = field(default_factory=default_realtime_settings)
     recognition_prompt: str = ""
+    meeting_name: str = ""
+    meeting_app: str = ""
     stop_event: threading.Event = field(default_factory=threading.Event)
     active_event: threading.Event = field(default_factory=threading.Event)
     audio_queue: "queue.Queue[Optional[TranscriptJob]]" = field(default_factory=queue.Queue)
@@ -2059,6 +2065,7 @@ class OfflineTranscriptWindow:
         whisper_language = self.app.realtime_whisper_language(language)
         return {
             "language": language,
+            "engine": asr_models.infer_engine(self.app.realtime_language_settings(language)),
             "model_path": model_path,
             "device": self.device_var.get().strip() or WHISPER_DEVICE,
             "compute_type": self.compute_type_var.get().strip() or WHISPER_COMPUTE_TYPE,
@@ -2084,6 +2091,8 @@ class OfflineTranscriptWindow:
         self.transcriber_input_queue = context.Queue(maxsize=1)
         self.transcriber_output_queue = context.Queue(maxsize=4)
         config = {
+            "engine": settings.get("engine", "whisper"),
+            "sample_rate": settings.get("sample_rate",16000),
             "model_path": settings["model_path"],
             "device": settings["device"],
             "compute_type": settings["compute_type"],
@@ -2601,6 +2610,7 @@ class SystemSettingsWindow:
 
     def _add_summary_controls(self, parent: ttk.Frame) -> None:
         self.summary_vars = {
+            "llm_auto_setup": tk.BooleanVar(),
             "llm_summary_enabled": tk.BooleanVar(),
             "llm_model_preset": tk.StringVar(),
             "llm_summary_base_url": tk.StringVar(),
@@ -2626,6 +2636,9 @@ class SystemSettingsWindow:
             "llm_resume_idle_seconds": tk.DoubleVar(),
         }
         row = 0
+        SelectableCheckbutton(parent, text="Prepare local LLM on launch / 启动时准备本地模型",
+            variable=self.summary_vars["llm_auto_setup"]).grid(row=row, column=0,columnspan=2,sticky="w",pady=4)
+        row += 1
         SelectableCheckbutton(
             parent,
             text="Use local LLM for final meeting summary",
@@ -2730,7 +2743,7 @@ class SystemSettingsWindow:
             parent,
             text=(
                 "Managed mode starts the local server automatically and downloads the official llama runtime if missing. "
-                "Download a model above. Setup progress appears in Summary Queue. "
+                "The default model is prepared in the background on first launch; progress and Pause/Retry are in Recording & Text. "
                 "With managed mode off, start your own llama.cpp or Ollama server."
             ),
             wraplength=460,
@@ -2821,6 +2834,7 @@ class SystemSettingsWindow:
         prompt.grid(row=row, column=0, columnspan=2, sticky="nsew")
         parent.rowconfigure(row, weight=1)
         self.prompt_widgets[language] = prompt
+        SelectableLabel(parent, text="Zipformer / Paraformer / SenseVoice use CPU; Whisper beam, prompt, VAD and compute options do not apply.\n这些模型按音频分段出结果；SenseVoice 非原生流式。",wraplength=470).grid(row=row+1,column=0,columnspan=2,sticky="w",pady=8)
 
     def _entry(self, parent: ttk.Frame, label: str, variable: tk.Variable, row: int) -> None:
         SelectableLabel(parent, text=label).grid(row=row, column=0, sticky="w", pady=(8, 0), padx=(0, 10))
@@ -2945,6 +2959,12 @@ class SystemSettingsWindow:
 
     def download_model_worker(self, language: str, repo_id: str, target_dir: Path) -> None:
         try:
+            preset = next((p for p in asr_models.presets(language) if p["repo_id"] == repo_id), None)
+            if preset:
+                asr_models.download(preset["id"], target_dir,
+                    lambda percent, message: self.app.ui_dispatcher.post(self.update_model_download_progress, language, percent, message))
+                self.app.ui_dispatcher.post(self.finish_model_download, language, target_dir, None)
+                return
             from huggingface_hub import HfApi, hf_hub_download
 
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -3159,6 +3179,7 @@ class SystemSettingsWindow:
                 config[key] = variable.get()
             preset = self.model_preset_by_label(language, str(vars_for_language["model_preset"].get() or ""))
             config["model_preset"] = preset["id"] if preset is not None else ""
+            config["engine"] = preset.get("engine", "whisper") if preset else "whisper"
             if preset is not None:
                 config["model_repo_id"] = preset["repo_id"]
             config["initial_prompt"] = self.prompt_widgets[language].get("1.0", tk.END).strip()
@@ -3213,6 +3234,7 @@ class MeetingRecorderApp:
         self.about_chinese_check: Optional[ttk.Checkbutton] = None
         self.language = DEFAULT_LANGUAGE
         self.shutting_down = False
+        self.initial_llm_setup = LocalModelSetup()
         self.transcript_blocks: list[TranscriptBlock] = []
         self.transcript_body_text = ""
         self.meeting_minutes_text = ""
@@ -3424,7 +3446,7 @@ class MeetingRecorderApp:
     def realtime_model_path(self, language: str) -> str:
         config = self.realtime_language_settings(language)
         model_dir = Path(str(config.get("model_dir", "")))
-        if usable_model_dir(model_dir):
+        if usable_model_dir(model_dir) or asr_models.infer_engine(config) != "whisper":
             return str(model_dir)
         return str(config.get("model_name", whisper_model_path(language)))
 
@@ -3540,6 +3562,7 @@ class MeetingRecorderApp:
 
     def run(self) -> None:
         self.ui_dispatcher.start()
+        self.root.after(1500, self.start_initial_llm_setup)
         if sys.platform == "darwin":
             self.root.createcommand("tk::mac::ReopenApplication",
                                     lambda: self.ui_dispatcher.post(self.show_main_tab))
@@ -3556,6 +3579,39 @@ class MeetingRecorderApp:
             cleanup_power_hooks()
             with contextlib.suppress(Exception):
                 self.icon.stop()
+
+    def start_initial_llm_setup(self, manual=False):
+        settings = copy.deepcopy(self.realtime_settings)
+        if self.shutting_down or os.environ.get("ATR_DISABLE_AUTO_SETUP") == "1":
+            return
+        if not settings.get("llm_server_managed", True) or not settings.get("llm_summary_enabled", True):
+            return
+        if not manual and not settings.get("llm_auto_setup", True):
+            return
+        preset = llm_preset_by_id(str(settings.get("llm_model_preset", "")))
+        if not preset and not settings.get("llm_server_model_path"):
+            return  # Preserve a custom API/model configuration.
+        if preset and not settings.get("llm_server_model_path"):
+            existing = find_downloaded_llm_model(preset)
+            if existing:
+                settings["llm_server_model_path"] = str(existing)
+        old_path = str(self.realtime_settings.get("llm_server_model_path", ""))
+        preset_id = settings.get("llm_model_preset")
+        def complete(path):
+            current = self.realtime_settings
+            if (not self.shutting_down and current.get("llm_model_preset") == preset_id
+                    and str(current.get("llm_server_model_path", "")) == old_path):
+                current["llm_server_model_path"] = str(path)
+                self.save_user_settings()
+                if self.system_settings_window:
+                    panel = self.system_settings_window
+                    panel.summary_vars["llm_server_model_path"].set(str(path))
+                    panel.refresh_llm_download_status()
+        self.initial_llm_setup.start(app_directory(), settings, preset,
+            llm_preset_model_dir(preset) if preset else llm_models_directory(),
+            completed=lambda path: self.ui_dispatcher.post(complete,path))
+        if not settings.get("llm_server_model_path") and self.main_notebook is None:
+            self.show_main_tab()
 
     def show_main_tab(self, key="recording") -> None:
         if self.main_notebook is None:
@@ -3576,6 +3632,14 @@ class MeetingRecorderApp:
             self.record_button.pack(side=tk.LEFT)
             self.record_status = SelectableLabel(controls)
             self.record_status.pack(side=tk.LEFT, padx=15)
+            setup_row = ttk.Frame(self.main_tabs["recording"],padding=(12,0,12,8))
+            setup_row.pack(fill=tk.X)
+            self.initial_setup_status = tk.StringVar()
+            SelectableLabel(setup_row,textvariable=self.initial_setup_status,wraplength=700).pack(side=tk.LEFT,fill=tk.X,expand=True)
+            self.setup_pause_button = ttk.Button(setup_row,text="Pause setup / 暂停下载",command=self.initial_llm_setup.pause)
+            self.setup_pause_button.pack(side=tk.LEFT,padx=4)
+            self.setup_retry_button = ttk.Button(setup_row,text="Resume / Retry / 继续",command=lambda:self.start_initial_llm_setup(manual=True))
+            self.setup_retry_button.pack(side=tk.LEFT)
             self.transcript_window = TranscriptWindow(self.root, self, self.main_tabs["recording"])
             self.transcript_window.set_text(self.transcript_text)
             self.offline_window = OfflineTranscriptWindow(self.root, self, self.main_tabs["offline"])
@@ -3600,6 +3664,11 @@ class MeetingRecorderApp:
             return
         self.record_button.configure(text=self.record_menu_text, state="disabled" if self.state == "stopping" else "normal")
         self.record_status.configure(text=f"Status: {self.state}")
+        setup = self.initial_llm_setup
+        running = bool(setup.thread and setup.thread.is_alive())
+        self.setup_pause_button.configure(state="normal" if running else "disabled")
+        self.setup_retry_button.configure(state="disabled" if running else "normal")
+        self.initial_setup_status.set(f"{setup.message} ({setup.percent:.0f}%)" if setup.message else "")
         self.screenshot_toggle.configure(text=self.auto_screenshot_menu_text)
         self.screenshot_status.configure(text=f"Folder: {self.screenshot_dir or self.screenshot_root()}")
         self.root.after(500, self.refresh_main_status)
@@ -3804,6 +3873,8 @@ class MeetingRecorderApp:
         if self.shutting_down:
             return
         self.shutting_down = True
+        if getattr(self, "initial_llm_setup", None):
+            self.initial_llm_setup.pause()
         self.set_auto_screenshot_enabled(False)
         with contextlib.suppress(queue.Full):
             self.summary_jobs.put_nowait(None)
@@ -3907,13 +3978,32 @@ class MeetingRecorderApp:
         window = tk.Toplevel(self.root)
         self.recording_options_window = window
         window.title(self.t("recording_options_title"))
-        window.geometry("480x490")
+        window.geometry("560x650")
         window.resizable(False, False)
         window.protocol("WM_DELETE_WINDOW", self.close_recording_options_window)
 
         frame = ttk.Frame(window, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
 
+        candidates = detect_meetings()
+        self.meeting_candidates = {item.label: item for item in candidates}
+        first = candidates[0] if candidates else None
+        self.meeting_name_var = tk.StringVar(value=first.title if first else "")
+        self.meeting_app_var = tk.StringVar(value=first.app if first else "")
+        self.meeting_choice_var = tk.StringVar(value=first.label if first else "")
+        self.meeting_auto_values = (self.meeting_name_var.get(), self.meeting_app_var.get())
+        SelectableLabel(frame, text="Meeting / 会议（自动识别，可修改）").pack(anchor="w")
+        self.meeting_choice_combo = ttk.Combobox(frame, textvariable=self.meeting_choice_var,
+            values=list(self.meeting_candidates), state="readonly")
+        self.meeting_choice_combo.pack(fill="x", pady=3)
+        self.meeting_choice_combo.bind("<<ComboboxSelected>>", self.select_detected_meeting)
+        names = ttk.Frame(frame); names.pack(fill="x", pady=(2,10))
+        ttk.Entry(names, textvariable=self.meeting_name_var, width=37).pack(side="left",fill="x",expand=True)
+        ttk.Entry(names, textvariable=self.meeting_app_var, width=13).pack(side="left",padx=6)
+        ttk.Button(names, text="Detect / 识别", command=self.refresh_detected_meetings).pack(side="left")
+        # Retry for ten seconds while the dialog is open, without overwriting edits.
+        for delay in (2000,5000,10000):
+            self.root.after(delay, lambda w=window: self.retry_meeting_detection(w))
         self.recording_options_language_var = tk.StringVar(value=DEFAULT_TRANSCRIPTION_LANGUAGE)
         self.recording_options_auto_screenshot_var = tk.BooleanVar(value=self.auto_screenshot_enabled)
 
@@ -3964,12 +4054,31 @@ class MeetingRecorderApp:
         window.update_idletasks()
         x = max(0, (window.winfo_screenwidth() - window.winfo_width()) // 2)
         y = max(0, (window.winfo_screenheight() - window.winfo_height()) // 2)
-        window.geometry(f"480x490+{x}+{y}")
+        window.geometry(f"560x650+{x}+{y}")
         with contextlib.suppress(Exception):
             window.attributes("-topmost", True)
         with contextlib.suppress(Exception):
             window.lift()
             window.focus_force()
+
+    def select_detected_meeting(self, event=None):
+        item = self.meeting_candidates.get(self.meeting_choice_var.get())
+        if item:
+            self.meeting_name_var.set(item.title)
+            self.meeting_app_var.set(item.app)
+            self.meeting_auto_values = (item.title, item.app)
+
+    def refresh_detected_meetings(self):
+        self.meeting_candidates = {item.label: item for item in detect_meetings()}
+        self.meeting_choice_combo.configure(values=list(self.meeting_candidates))
+        if self.meeting_candidates:
+            self.meeting_choice_var.set(next(iter(self.meeting_candidates)))
+            self.select_detected_meeting()
+
+    def retry_meeting_detection(self, window):
+        if (self.recording_options_window is window and not self.meeting_name_var.get()
+                and (self.meeting_name_var.get(),self.meeting_app_var.get()) == self.meeting_auto_values):
+            self.refresh_detected_meetings()
 
     def close_recording_options_window(self) -> None:
         if self.recording_options_window is not None:
@@ -4001,8 +4110,9 @@ class MeetingRecorderApp:
         self.recording_prompts[language] = recognition_prompt
         self.realtime_settings["microphone_mode"] = self.recording_microphone_var.get()
         self.save_user_settings()
+        meeting_name, meeting_app = self.meeting_name_var.get().strip(), self.meeting_app_var.get().strip()
         self.close_recording_options_window()
-        self.begin_recording(language, auto_screenshot, recognition_prompt)
+        self.begin_recording(language, auto_screenshot, recognition_prompt, meeting_name, meeting_app)
 
     def toggle_recording(self) -> None:
         with self.state_lock:
@@ -4043,6 +4153,8 @@ class MeetingRecorderApp:
         transcription_language: str,
         auto_screenshot_requested: bool,
         recognition_prompt: str = "",
+        meeting_name: str = "",
+        meeting_app: str = "",
     ) -> None:
         with self.state_lock:
             state = self.state
@@ -4058,7 +4170,7 @@ class MeetingRecorderApp:
         self.stop_managed_llm_server()
         try:
             file_stem, mp3_partial_path, text_partial_path, mp3_final_path, text_final_path = recording_output_paths(
-                recording_file_stem()
+                meeting_stem(recording_file_stem(), meeting_name, meeting_app)
             )
         except Exception as exc:
             messagebox.showerror(self.title(), f"{self.t('save_failed')}\n{exc}")
@@ -4076,6 +4188,7 @@ class MeetingRecorderApp:
             transcription_language=transcription_language,
             realtime_settings=settings_snapshot,
             recognition_prompt=recognition_prompt,
+            meeting_name=meeting_name, meeting_app=meeting_app,
         )
         language_config = settings_snapshot.get("languages", {}).get(transcription_language, {})
         session.disk_write_interval_seconds = max(
@@ -4774,7 +4887,7 @@ class MeetingRecorderApp:
             if not isinstance(language_config, dict):
                 language_config = {}
             model_dir = Path(str(language_config.get("model_dir", "")))
-            if usable_model_dir(model_dir):
+            if usable_model_dir(model_dir) or asr_models.infer_engine(language_config) != "whisper":
                 model_path = str(model_dir)
             else:
                 model_path = str(language_config.get("model_name", whisper_model_path(session.transcription_language)))
@@ -4791,6 +4904,8 @@ class MeetingRecorderApp:
             if language_value == "":
                 language_value = None
             config = {
+                "engine": asr_models.infer_engine(language_config),
+                "sample_rate": int(settings.get("sample_rate",16000)),
                 "model_path": model_path,
                 "device": str(settings.get("whisper_device", WHISPER_DEVICE)),
                 "compute_type": str(settings.get("compute_type", WHISPER_COMPUTE_TYPE)),
@@ -6403,6 +6518,14 @@ class MeetingRecorderApp:
         if needs_runtime:
             model_path = str(settings.get("llm_server_model_path", "") or "").strip()
             model_ref = str(settings.get("llm_server_model_ref", settings.get("llm_summary_model", "")) or "").strip()
+            if not model_path:
+                preset = llm_preset_by_id(str(settings.get("llm_model_preset", "")))
+                downloaded = find_downloaded_llm_model(preset) if preset else None
+                if downloaded:
+                    model_path = str(downloaded)
+                    settings["llm_server_model_path"] = model_path
+                elif getattr(getattr(self, "initial_llm_setup", None), "state", "") in ("running", "paused"):
+                    raise SummaryPaused("Waiting for local model setup / 等待本地模型下载")
             if model_path and not Path(model_path).is_file():
                 raise RuntimeError(f"Local LLM model file was not found: {model_path}. Select an existing GGUF file or download the model in System Settings > Summary.")
             if not model_path and not model_ref:

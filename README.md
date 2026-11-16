@@ -158,3 +158,19 @@ ollama run hf.co/lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
 OpenAI-compatible URL: http://127.0.0.1:11434/v1/chat/completions
 Model: hf.co/lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
 ```
+
+
+## 1.0.12 additions
+
+- Meeting name and app are detected before recording and can be edited. Saved
+  audio, text and screenshot folders include the meeting name. Detection is best
+  effort; select the right window if several meeting apps are open.
+- First launch prepares the default local LLM in the background. The Recording
+  tab shows progress and Pause / Resume / Retry. Existing LLM choices are kept.
+- System Settings → English / Chinese model presets now include Zipformer small
+  bilingual, SenseVoice Small INT8, and streaming Paraformer bilingual INT8.
+  Select a preset, download it, then save settings. The selected language's model
+  is used for both recording and Offline Transcript. These three CPU backends
+  process audio windows; Whisper-only decoding controls do not apply to them.
+
+See [CROSS_PLATFORM.md](CROSS_PLATFORM.md) for limitations and validation.

@@ -92,7 +92,7 @@ print("RESULT=" + json.dumps(observed), flush=True)
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run([sys.executable, "-c", script],
                                     cwd=Path(__file__).resolve().parent,
-                                    env={**os.environ, "ATR_DATA_DIR": directory},
+                                    env={**os.environ, "ATR_DATA_DIR": directory, "ATR_DISABLE_AUTO_SETUP": "1"},
                                     capture_output=True, text=True, timeout=25)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(result.stdout.split("RESULT=")[-1].strip()),
