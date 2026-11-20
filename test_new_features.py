@@ -126,6 +126,48 @@ class SetupTests(unittest.TestCase):
 
 
 class SettingsIntegrationTests(unittest.TestCase):
+    def test_summary_presets_and_new_slice_defaults(self):
+        import main
+        self.assertIsNotNone(main.llm_preset_by_id('qwen3.5-0.8b-q4-0'))
+        self.assertEqual(sum(p['id']=='qwen3-0.6b-q8' for p in main.LLM_MODEL_PRESETS),1)
+        for language in ['en','zh']:
+            cfg=main.default_realtime_settings()['languages'][language]
+            self.assertEqual((cfg['transcribe_seconds'],cfg['overlap_seconds']),(30,2))
+        offline=main.default_offline_transcript_settings()
+        self.assertEqual((offline['slice_seconds'],offline['overlap_seconds']),(30,2))
+
+    def test_first_launch_only_offers_settings_once_without_downloading(self):
+        import main
+        for choice in [False,True]:
+            app=main.MeetingRecorderApp.__new__(main.MeetingRecorderApp)
+            app.shutting_down=False;app.model_settings_prompt_seen=False
+            app.root=Mock();app.title=Mock(return_value='ATR')
+            app.save_user_settings=Mock();app.show_main_tab=Mock()
+            app.system_settings_window=Mock();app.initial_llm_setup=Mock()
+            app.realtime_settings=main.default_realtime_settings()
+            app.realtime_settings['llm_auto_setup']=True  # Old saved option must not restore auto-download.
+            with patch.dict(os.environ,{'ATR_DISABLE_AUTO_SETUP':'0'}),patch.object(main.messagebox,'askyesno',return_value=choice) as ask:
+                app.offer_model_settings();app.offer_model_settings()
+                app.start_initial_llm_setup()
+            ask.assert_called_once();app.save_user_settings.assert_called_once()
+            app.initial_llm_setup.start.assert_not_called()
+            if choice:
+                app.show_main_tab.assert_called_once_with('settings')
+                app.system_settings_window.model_settings_notebook.select.assert_called_once_with(1)
+            else:app.show_main_tab.assert_not_called()
+
+    def test_saved_custom_slices_and_prompt_marker_survive_loading(self):
+        import main
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'settings.json'
+            path.write_text(json.dumps({'model_settings_prompt_seen':True,'realtime_settings':{'llm_server_managed':True,'languages':{'en':{'transcribe_seconds':15,'overlap_seconds':0}}},'offline_transcript_settings':{'slice_seconds':12,'overlap_seconds':1}}))
+            app=main.MeetingRecorderApp.__new__(main.MeetingRecorderApp)
+            with patch.object(main,'user_settings_path',return_value=path):app.load_user_settings()
+            self.assertTrue(app.model_settings_prompt_seen)
+            cfg=app.realtime_settings['languages']['en']
+            self.assertEqual((cfg['transcribe_seconds'],cfg['overlap_seconds']),(15,0))
+            self.assertEqual(app.offline_transcript_settings['slice_seconds'],12)
+
     def test_model_selection_offline_backend_and_editable_meeting_title(self):
         import tkinter as tk
         import main

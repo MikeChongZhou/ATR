@@ -245,3 +245,20 @@ meeting titles, download pause/resume/checksum, macOS runtime layout and native
 Cocoa callbacks. All three ASR backends completed English and Chinese jobs through
 the real spawned worker. An isolated first-run test downloaded and SHA256-verified
 the 1,282,439,328-byte default GGUF, without changing the user's existing model.
+
+
+### 1.0.13: opt-in model setup and longer transcription windows
+
+The first launch now asks whether to open System Settings → Summary. The answer
+is persisted outside the editable model settings; both Yes and No avoid model or
+runtime downloads. Legacy `llm_auto_setup=true` cannot enable startup downloads.
+Download/preparation remains available explicitly through settings or Prepare /
+Retry. Qwen3.5 0.8B Q4_0 (ggml-org GGUF) is added to summary presets; the existing
+Qwen3 0.6B Q8_0 entry is retained without duplication. No selected model is changed.
+The current LLM context configuration is unchanged.
+
+Fresh recording presets for both languages and offline transcription now default
+to 30-second slices and 2-second overlap. Saved settings remain in force unless
+the user resets them. 73 tests pass, including one-time prompt navigation with
+no download, legacy startup-option suppression, new defaults and saved-value
+preservation.

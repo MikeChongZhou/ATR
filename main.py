@@ -50,14 +50,15 @@ from desktop_ui import (EmbeddedPanel, SummaryQueueView, MouseWheelRouter, CopyT
 
 
 APP_NAME = "Local Meeting Recorder"
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 RECORD_SAMPLE_RATE = 48000
 TRANSCRIBE_SAMPLE_RATE = 16000
 CHANNELS = 1
 CHUNK_SECONDS = 0.5
 CAPTURE_READ_SECONDS = 0.05
 CAPTURE_BLOCK_SECONDS = 0.2
-TRANSCRIBE_SECONDS = 3
+TRANSCRIBE_SECONDS = 30
+DEFAULT_OVERLAP_SECONDS = 2.0
 REALTIME_MIN_AUDIO_SECONDS = 1.5
 REALTIME_BEAM_SIZE = 3
 REVIEW_SECONDS = 15
@@ -145,7 +146,7 @@ TRANSCRIPTION_MODEL_CONFIGS = {
         "model_name": ENGLISH_WHISPER_MODEL,
         "model_dir": ENGLISH_MODEL_DIR,
         "language": "en",
-        "transcribe_seconds": 5,
+        "transcribe_seconds": 30,
         "beam_size": 5,
         "condition_on_previous_text": True,
         "initial_prompt": None,
@@ -155,7 +156,7 @@ TRANSCRIPTION_MODEL_CONFIGS = {
         "model_name": CHINESE_WHISPER_MODEL,
         "model_dir": CHINESE_MODEL_DIR,
         "language": "zh",
-        "transcribe_seconds": 10,
+        "transcribe_seconds": 30,
         "beam_size": 5,
         "condition_on_previous_text": True,
         "initial_prompt": (
@@ -279,6 +280,13 @@ LLM_MODEL_PRESETS: list[dict[str, str]] = [
         "model_ref": "Qwen/Qwen3-1.7B-GGUF:Q8_0",
         "repo_id": "Qwen/Qwen3-1.7B-GGUF",
         "quant": "Q8_0",
+    },
+    {
+        "id": "qwen3.5-0.8b-q4-0",
+        "label": "Qwen3.5 0.8B Q4_0 (small, long context)",
+        "model_ref": "ggml-org/Qwen3.5-0.8B-GGUF:Q4_0",
+        "repo_id": "ggml-org/Qwen3.5-0.8B-GGUF",
+        "quant": "Q4_0",
     },
     {
         "id": "qwen3-0.6b-q8",
@@ -877,7 +885,7 @@ def default_realtime_settings() -> dict[str, Any]:
         "meeting_end_silence_seconds": 180.0,
         "meeting_end_microphone_release_seconds": 60.0,
         "meeting_end_reminder_seconds": 600.0,
-        "llm_auto_setup": True,
+        "llm_auto_setup": False,
         "llm_summary_enabled": True,
         "llm_summary_base_url": "http://127.0.0.1:8080/v1/chat/completions",
         "llm_model_preset": llm_preset["id"],
@@ -913,7 +921,7 @@ def default_realtime_settings() -> dict[str, Any]:
                 "model_dir": str(whisper_preset_local_dir(english_preset)),
                 "language": english_preset["language"],
                 "transcribe_seconds": realtime_transcribe_seconds("en"),
-                "overlap_seconds": 0.0,
+                "overlap_seconds": DEFAULT_OVERLAP_SECONDS,
                 "beam_size": realtime_beam_size("en"),
                 "condition_on_previous_text": condition_on_previous_text("en"),
                 "initial_prompt": transcription_initial_prompt("en") or "",
@@ -926,7 +934,7 @@ def default_realtime_settings() -> dict[str, Any]:
                 "model_dir": str(whisper_preset_local_dir(chinese_preset)),
                 "language": chinese_preset["language"],
                 "transcribe_seconds": realtime_transcribe_seconds("zh"),
-                "overlap_seconds": 0.0,
+                "overlap_seconds": DEFAULT_OVERLAP_SECONDS,
                 "beam_size": realtime_beam_size("zh"),
                 "condition_on_previous_text": condition_on_previous_text("zh"),
                 "initial_prompt": transcription_initial_prompt("zh") or "",
@@ -941,7 +949,7 @@ def default_offline_transcript_settings() -> dict[str, Any]:
     return {
         "language": language,
         "slice_seconds": realtime_transcribe_seconds(language),
-        "overlap_seconds": 0.0,
+        "overlap_seconds": DEFAULT_OVERLAP_SECONDS,
         "beam_size": realtime_beam_size(language),
         "min_rms": MIN_TRANSCRIBE_RMS,
         "vad_filter": True,
@@ -1430,7 +1438,7 @@ class OfflineTranscriptWindow:
 
         self.language_var = tk.StringVar(value=DEFAULT_TRANSCRIPTION_LANGUAGE)
         self.slice_seconds_var = tk.DoubleVar(value=realtime_transcribe_seconds(DEFAULT_TRANSCRIPTION_LANGUAGE))
-        self.overlap_seconds_var = tk.DoubleVar(value=0.0)
+        self.overlap_seconds_var = tk.DoubleVar(value=DEFAULT_OVERLAP_SECONDS)
         self.beam_size_var = tk.IntVar(value=realtime_beam_size(DEFAULT_TRANSCRIPTION_LANGUAGE))
         self.device_var = tk.StringVar(value=WHISPER_DEVICE)
         self.compute_type_var = tk.StringVar(value=WHISPER_COMPUTE_TYPE)
@@ -1667,7 +1675,7 @@ class OfflineTranscriptWindow:
                 language = DEFAULT_TRANSCRIPTION_LANGUAGE
             self.language_var.set(language)
             self.slice_seconds_var.set(float(settings.get("slice_seconds", realtime_transcribe_seconds(language))))
-            self.overlap_seconds_var.set(float(settings.get("overlap_seconds", 0.0)))
+            self.overlap_seconds_var.set(float(settings.get("overlap_seconds", DEFAULT_OVERLAP_SECONDS)))
             self.beam_size_var.set(int(settings.get("beam_size", realtime_beam_size(language))))
             self.min_rms_var.set(float(settings.get("min_rms", MIN_TRANSCRIBE_RMS)))
             self.vad_var.set(bool(settings.get("vad_filter", True)))
@@ -2510,6 +2518,7 @@ class SystemSettingsWindow:
         ttk.Button(button_row, text="Save", command=self.save).pack(side=tk.RIGHT, padx=(0, 8))
 
         notebook = ttk.Notebook(outer)
+        self.model_settings_notebook = notebook
         notebook.grid(row=1, column=0, sticky="nsew")
 
         common = self._create_scrollable_tab(notebook, "Common")
@@ -2610,7 +2619,6 @@ class SystemSettingsWindow:
 
     def _add_summary_controls(self, parent: ttk.Frame) -> None:
         self.summary_vars = {
-            "llm_auto_setup": tk.BooleanVar(),
             "llm_summary_enabled": tk.BooleanVar(),
             "llm_model_preset": tk.StringVar(),
             "llm_summary_base_url": tk.StringVar(),
@@ -2636,9 +2644,6 @@ class SystemSettingsWindow:
             "llm_resume_idle_seconds": tk.DoubleVar(),
         }
         row = 0
-        SelectableCheckbutton(parent, text="Prepare local LLM on launch / 启动时准备本地模型",
-            variable=self.summary_vars["llm_auto_setup"]).grid(row=row, column=0,columnspan=2,sticky="w",pady=4)
-        row += 1
         SelectableCheckbutton(
             parent,
             text="Use local LLM for final meeting summary",
@@ -2743,7 +2748,7 @@ class SystemSettingsWindow:
             parent,
             text=(
                 "Managed mode starts the local server automatically and downloads the official llama runtime if missing. "
-                "The default model is prepared in the background on first launch; progress and Pause/Retry are in Recording & Text. "
+                "First launch offers to open model settings without downloading. Select a model and click Download, or use Prepare/Retry in Recording & Text. "
                 "With managed mode off, start your own llama.cpp or Ollama server."
             ),
             wraplength=460,
@@ -3382,6 +3387,7 @@ class MeetingRecorderApp:
             self._windows_old_wndproc = None
 
     def load_user_settings(self) -> None:
+        self.model_settings_prompt_seen = False
         settings = default_realtime_settings()
         offline_settings = default_offline_transcript_settings()
         prompts = {"en": "", "zh": ""}
@@ -3390,6 +3396,7 @@ class MeetingRecorderApp:
         try:
             if path.exists():
                 data = json.loads(path.read_text(encoding="utf-8"))
+                self.model_settings_prompt_seen = bool(data.get("model_settings_prompt_seen", False))
                 stored_settings = data.get("realtime_settings")
                 needs_llm_migration = isinstance(stored_settings, dict) and "llm_server_managed" not in stored_settings
                 merge_dict(settings, stored_settings)
@@ -3418,6 +3425,7 @@ class MeetingRecorderApp:
 
     def save_user_settings(self) -> None:
         payload = {
+            "model_settings_prompt_seen": getattr(self, "model_settings_prompt_seen", False),
             "realtime_settings": self.realtime_settings,
             "offline_transcript_settings": self.offline_transcript_settings,
             "recording_prompts": self.recording_prompts,
@@ -3562,7 +3570,7 @@ class MeetingRecorderApp:
 
     def run(self) -> None:
         self.ui_dispatcher.start()
-        self.root.after(1500, self.start_initial_llm_setup)
+        self.root.after(1500, self.offer_model_settings)
         if sys.platform == "darwin":
             self.root.createcommand("tk::mac::ReopenApplication",
                                     lambda: self.ui_dispatcher.post(self.show_main_tab))
@@ -3580,13 +3588,26 @@ class MeetingRecorderApp:
             with contextlib.suppress(Exception):
                 self.icon.stop()
 
+    def offer_model_settings(self):
+        if (self.shutting_down or self.model_settings_prompt_seen
+                or os.environ.get("ATR_DISABLE_AUTO_SETUP") == "1"):
+            return
+        inspect_settings = messagebox.askyesno(
+            self.title(), "Would you like to check the summary and speech model settings?\n是否检查会议纪要与语音模型设置？",
+            parent=self.root)
+        self.model_settings_prompt_seen = True
+        self.save_user_settings()
+        if inspect_settings:
+            self.show_main_tab("settings")
+            self.system_settings_window.model_settings_notebook.select(1)  # Summary
+
     def start_initial_llm_setup(self, manual=False):
         settings = copy.deepcopy(self.realtime_settings)
         if self.shutting_down or os.environ.get("ATR_DISABLE_AUTO_SETUP") == "1":
             return
         if not settings.get("llm_server_managed", True) or not settings.get("llm_summary_enabled", True):
             return
-        if not manual and not settings.get("llm_auto_setup", True):
+        if not manual:
             return
         preset = llm_preset_by_id(str(settings.get("llm_model_preset", "")))
         if not preset and not settings.get("llm_server_model_path"):
@@ -3638,7 +3659,7 @@ class MeetingRecorderApp:
             SelectableLabel(setup_row,textvariable=self.initial_setup_status,wraplength=700).pack(side=tk.LEFT,fill=tk.X,expand=True)
             self.setup_pause_button = ttk.Button(setup_row,text="Pause setup / 暂停下载",command=self.initial_llm_setup.pause)
             self.setup_pause_button.pack(side=tk.LEFT,padx=4)
-            self.setup_retry_button = ttk.Button(setup_row,text="Resume / Retry / 继续",command=lambda:self.start_initial_llm_setup(manual=True))
+            self.setup_retry_button = ttk.Button(setup_row,text="Prepare / Retry / 准备",command=lambda:self.start_initial_llm_setup(manual=True))
             self.setup_retry_button.pack(side=tk.LEFT)
             self.transcript_window = TranscriptWindow(self.root, self, self.main_tabs["recording"])
             self.transcript_window.set_text(self.transcript_text)
@@ -4557,7 +4578,7 @@ class MeetingRecorderApp:
             float(language_config.get("transcribe_seconds", realtime_transcribe_seconds(session.transcription_language))),
         )
         overlap_seconds = min(
-            max(0.0, float(language_config.get("overlap_seconds", 0.0))),
+            max(0.0, float(language_config.get("overlap_seconds", DEFAULT_OVERLAP_SECONDS))),
             max(0.0, transcribe_seconds - 0.25),
         )
         overlap_frames = int(sample_rate * overlap_seconds)

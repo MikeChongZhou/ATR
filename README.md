@@ -165,8 +165,8 @@ Model: hf.co/lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
 - Meeting name and app are detected before recording and can be edited. Saved
   audio, text and screenshot folders include the meeting name. Detection is best
   effort; select the right window if several meeting apps are open.
-- First launch prepares the default local LLM in the background. The Recording
-  tab shows progress and Pause / Resume / Retry. Existing LLM choices are kept.
+- First launch offers to open model settings without downloading (updated in
+  1.0.13). Model downloads/preparation are started explicitly by the user.
 - System Settings → English / Chinese model presets now include Zipformer small
   bilingual, SenseVoice Small INT8, and streaming Paraformer bilingual INT8.
   Select a preset, download it, then save settings. The selected language's model
@@ -174,3 +174,14 @@ Model: hf.co/lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
   process audio windows; Whisper-only decoding controls do not apply to them.
 
 See [CROSS_PLATFORM.md](CROSS_PLATFORM.md) for limitations and validation.
+
+
+## 1.0.13 model settings update
+
+- Summary presets add Qwen3.5 0.8B Q4_0; Qwen3 0.6B Q8_0 remains available.
+- The first launch asks whether to inspect model settings. Yes opens System
+  Settings → Summary; No continues normally. Neither answer downloads a model.
+  This one-time answer is remembered independently of model settings.
+- New English/Chinese recording and offline transcription defaults use 30-second
+  slices with 2-second overlap. Previously saved custom values are preserved;
+  Defaults restores the new values.
