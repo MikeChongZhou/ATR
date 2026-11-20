@@ -21,6 +21,7 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller installation failed" }
     --hidden-import faster_whisper `
     --hidden-import faster_whisper.audio `
     --collect-data faster_whisper `
+    --collect-all sherpa_onnx `
     --collect-data soundcard `
     --hidden-import huggingface_hub `
     --hidden-import huggingface_hub.hf_api `

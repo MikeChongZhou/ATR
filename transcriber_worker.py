@@ -46,15 +46,20 @@ def run_transcriber_process(input_queue: Any, output_queue: Any, config: dict[st
 
     model = None
     text_converter = make_text_converter(config)
+    from asr_models import infer_engine, SherpaEngine
+    engine = infer_engine(config)
     try:
-        from faster_whisper import WhisperModel
+        if engine == "whisper":
+            from faster_whisper import WhisperModel
+        else:
+            import sherpa_onnx
     except ImportError:
         output_queue.put({"kind": "missing"})
         output_queue.put({"kind": "done"})
         return
 
     try:
-        model = WhisperModel(
+        model = SherpaEngine(config) if engine != "whisper" else WhisperModel(
             config["model_path"],
             device=config["device"],
             compute_type=config["compute_type"],
@@ -86,8 +91,11 @@ def run_transcriber_process(input_queue: Any, output_queue: Any, config: dict[st
                 }
                 if config.get("initial_prompt"):
                     transcribe_options["initial_prompt"] = str(config["initial_prompt"])
-                segments, _info = model.transcribe(audio, **transcribe_options)
-                text = "".join(segment.text for segment in segments).strip()
+                if engine == "whisper":
+                    segments, _info = model.transcribe(audio, **transcribe_options)
+                    text = "".join(segment.text for segment in segments).strip()
+                else:
+                    text = model.transcribe(audio, config.get("sample_rate",16000))
                 if text and text_converter is not None:
                     text = text_converter.convert(text).strip()
             except Exception as exc:

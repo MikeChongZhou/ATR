@@ -3,7 +3,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 from pathlib import Path
-import os
+import sys
 
 
 class CopyTextRouter:
@@ -13,6 +13,9 @@ class CopyTextRouter:
         self.tag = f"RecorderCopy_{id(self)}"
         self.menu = tk.Menu(root, tearoff=False)
         root.bind_class(self.tag, "<Button-3>", self.popup)
+        if sys.platform == "darwin":
+            root.bind_class(self.tag, "<Button-2>", self.popup)
+            root.bind_class(self.tag, "<Control-Button-1>", self.popup)
         root.bind_all("<Map>", self.on_map, add="+")
         self.attach(root)
 
@@ -131,7 +134,7 @@ class MouseWheelRouter:
         for target in candidates:
             first, last = target.yview()
             if (event.delta < 0 and last < 0.999999) or (event.delta > 0 and first > 0.000001):
-                amount = self.remainders.get(str(target), 0) - event.delta / 120
+                amount = self.remainders.get(str(target), 0) - event.delta / (1 if sys.platform == "darwin" else 120)
                 steps = int(amount)
                 self.remainders[str(target)] = amount - steps
                 if steps:
@@ -327,7 +330,7 @@ class SummaryQueueView(ttk.Frame):
                 bar.pack(fill="x", pady=6)
                 buttons = ttk.Frame(row)
                 buttons.pack(fill="x")
-                ttk.Button(buttons, text="Open transcript", command=lambda p=record["text_path"]: os.startfile(str(Path(p).resolve()))).pack(side="left")
+                ttk.Button(buttons, text="Open transcript", command=lambda p=record["text_path"]: self.app.open_local_path(p)).pack(side="left")
                 retry = ttk.Button(buttons, text="Retry", command=lambda i=identity: self.app.retry_summary(i))
                 retry.pack(side="right")
                 self.rows[identity] = label, bar, retry

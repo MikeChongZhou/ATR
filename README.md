@@ -1,6 +1,6 @@
 # 本地会议录音
 
-这是一个 Windows 本地托盘录音工具。程序启动后默认显示英文界面，只显示托盘图标，右键图标可以打开菜单：
+这是一个以 Windows 为原有实现、正在增加 macOS 支持的本地托盘录音工具。Mac 版安装、构建、权限和当前限制见 [跨平台说明](CROSS_PLATFORM.md)。程序启动后默认显示英文界面，只显示托盘图标，右键图标可以打开菜单：
 
 - 🔴 Start Recording / ◼ Stop Recording
 - Text Window
@@ -158,3 +158,30 @@ ollama run hf.co/lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
 OpenAI-compatible URL: http://127.0.0.1:11434/v1/chat/completions
 Model: hf.co/lmstudio-community/Qwen3-1.7B-GGUF:Q4_K_M
 ```
+
+
+## 1.0.12 additions
+
+- Meeting name and app are detected before recording and can be edited. Saved
+  audio, text and screenshot folders include the meeting name. Detection is best
+  effort; select the right window if several meeting apps are open.
+- First launch offers to open model settings without downloading (updated in
+  1.0.13). Model downloads/preparation are started explicitly by the user.
+- System Settings → English / Chinese model presets now include Zipformer small
+  bilingual, SenseVoice Small INT8, and streaming Paraformer bilingual INT8.
+  Select a preset, download it, then save settings. The selected language's model
+  is used for both recording and Offline Transcript. These three CPU backends
+  process audio windows; Whisper-only decoding controls do not apply to them.
+
+See [CROSS_PLATFORM.md](CROSS_PLATFORM.md) for limitations and validation.
+
+
+## 1.0.13 model settings update
+
+- Summary presets add Qwen3.5 0.8B Q4_0; Qwen3 0.6B Q8_0 remains available.
+- The first launch asks whether to inspect model settings. Yes opens System
+  Settings → Summary; No continues normally. Neither answer downloads a model.
+  This one-time answer is remembered independently of model settings.
+- New English/Chinese recording and offline transcription defaults use 30-second
+  slices with 2-second overlap. Previously saved custom values are preserved;
+  Defaults restores the new values.
